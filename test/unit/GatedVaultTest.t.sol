@@ -5,6 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { MockUSDC } from "../../contracts/mocks/MockUSDC.sol";
+import { MockERC777 } from "../../contracts/mocks/MockERC777.sol";
 import { GatedVault } from "../../contracts/GatedVault.sol";
 
 /// @title  GatedVaultTest
@@ -90,8 +91,12 @@ contract GatedVaultTest is Test {
         // below by the offset-protected share count translated back through the warped
         // ratio. Concrete bound: victim recovers at least 50% of deposit even in this
         // pre-tracked-AUM regime; full ~99% expected after todo-13.
+        // After todo-13 (tracked AUM in `totalAssets()`), the donation no
+        // longer warps share price. Victim's redemption value should be
+        // within 1% of their deposit (some dust drift from offset math is
+        // acceptable; catastrophic dilution is not).
         uint256 victimRedemption = vault.previewRedeem(victimShares);
-        assertGe(victimRedemption, victimDeposit / 2, "victim redemption catastrophically diluted");
+        assertGe(victimRedemption, victimDeposit * 99 / 100, "victim redemption diluted past 1%");
     }
 
     // -------- Yield state surface (todo-11) --------
@@ -233,6 +238,58 @@ contract GatedVaultTest is Test {
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
         vault.depositYieldReserve(amount);
+    }
+
+    // -------- Tracked AUM + toxic asset reject (todo-13) --------
+
+    function test_TotalAssetsZeroBeforeAnyDeposit() public view {
+        assertEq(vault.totalAssets(), 0, "fresh vault must report zero AUM");
+    }
+
+    function test_TotalAssetsEqualsPrincipalBeforeYield() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        _aliceDeposits(amount);
+        // No time elapsed -> no pending yield -> totalAssets == principal
+        assertEq(vault.totalAssets(), amount, "totalAssets equals principal pre-yield");
+    }
+
+    function test_TotalAssetsIncludesPendingYield() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        _aliceDeposits(amount);
+        _ownerFundsReserve(50 * 10 ** usdc.decimals());
+
+        vm.warp(block.timestamp + 30 days);
+        uint256 pending = vault.pendingYield();
+        assertGt(pending, 0, "fixture must produce nonzero pending yield");
+        assertEq(vault.totalAssets(), amount + pending, "totalAssets = principal + pendingYield");
+    }
+
+    function test_DonationDoesNotWarpShares() public {
+        uint256 deposit = 100 * 10 ** usdc.decimals();
+        _aliceDeposits(deposit);
+
+        // Capture share-quote BEFORE donation
+        uint256 quote = 50 * 10 ** usdc.decimals();
+        uint256 sharesBefore = vault.convertToShares(quote);
+
+        // Anyone bare-transfers a large donation to the vault contract address.
+        // Tracked AUM means `principal` does not change, so `totalAssets()` is
+        // unaffected and `convertToShares()` returns the same number.
+        address donator = makeAddr("donator");
+        uint256 donation = 1000 * 10 ** usdc.decimals();
+        usdc.mint(donator, donation);
+        vm.prank(donator);
+        bool ok = usdc.transfer(address(vault), donation);
+        assertTrue(ok, "donation transfer return value");
+
+        uint256 sharesAfter = vault.convertToShares(quote);
+        assertEq(sharesBefore, sharesAfter, "donation must not warp share price");
+    }
+
+    function test_RejectsERC777Asset() public {
+        MockERC777 erc777 = new MockERC777();
+        vm.expectRevert(GatedVault.ERC777NotSupported.selector);
+        new GatedVault(IERC20Metadata(address(erc777)), owner, INITIAL_YIELD_RATE);
     }
 
     function test_SetYieldRateHarvestsBefore() public {

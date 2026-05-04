@@ -63,6 +63,14 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     /// @param max  Configured ceiling (`MAX_YIELD_RATE`).
     error YieldRateTooHigh(uint256 rate, uint256 max);
 
+    /// @notice Reverts when the underlying asset implements ERC-777 semantics.
+    /// @dev    The vault rejects ERC-777 at construction because its
+    ///         `tokensReceived` hook opens a reentrancy path on every
+    ///         `transfer` (Imbtc / dForce April 2020, $25M loss). Detection
+    ///         probes for `granularity()` (mandatory in ERC-777, absent in
+    ///         plain ERC-20) via low-level staticcall.
+    error ERC777NotSupported();
+
     /// @notice Emitted when the yield rate changes.
     event YieldRateUpdated(uint256 oldRate, uint256 newRate);
 
@@ -92,8 +100,37 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         if (initialYieldRate > MAX_YIELD_RATE) {
             revert YieldRateTooHigh(initialYieldRate, MAX_YIELD_RATE);
         }
+
+        // Toxic asset filter: ERC-777 mandates `granularity()`; ERC-20 has no
+        // such function. A successful staticcall to `granularity()` therefore
+        // identifies the asset as ERC-777-flavored, which the vault refuses
+        // because `tokensReceived` hooks would expose every transfer to a
+        // reentrancy callback (Imbtc / dForce April 2020, $25M loss).
+        // ERC-1820 registry probing is the more "canonical" path; this
+        // staticcall variant is dependency-free and sufficient for the
+        // standard ERC-777 implementations in the wild.
+        (bool isERC777,) = address(asset_).staticcall(abi.encodeWithSignature("granularity()"));
+        if (isERC777) {
+            revert ERC777NotSupported();
+        }
+
         yieldRate = initialYieldRate;
         lastHarvest = block.timestamp;
+    }
+
+    // -------- ERC-4626 accounting override --------
+
+    /// @inheritdoc ERC4626
+    /// @dev Tracked AUM = `principal + pendingYield()`. The OZ default
+    ///      `IERC20(asset).balanceOf(address(this))` is donation-warpable
+    ///      (Sonne 2022, Cream 2021); this override breaks the donation
+    ///      oracle attack class by ignoring tokens that arrived outside of
+    ///      the documented entry points (`deposit`, `mint`, `harvest`,
+    ///      `depositYieldReserve`). Pending yield is included so share
+    ///      conversions reflect accrual without forcing a write on every
+    ///      read.
+    function totalAssets() public view override returns (uint256) {
+        return principal + pendingYield();
     }
 
     // -------- Yield: setter --------
