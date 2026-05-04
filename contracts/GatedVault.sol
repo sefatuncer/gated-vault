@@ -36,6 +36,22 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         Ownable(owner_)
     { }
 
+    /// @notice Decimals offset for inflation-attack defense.
+    /// @dev    Returns 6: matches USDC's decimal precision and is the audit-grade
+    ///         floor for ERC-20 backing. The OZ virtual-shares pattern multiplies
+    ///         the cost of an inflation attack by 10^offset, so an attacker must
+    ///         lock 10^6 more capital to dilute a fresh depositor's shares to
+    ///         zero. Combined with tracked `_accountedAssets` (todo-13) and an
+    ///         atomic first-deposit seed in the deploy script (todo-78), this
+    ///         makes the classic 1-wei + donation attack economically unfeasible.
+    ///         References:
+    ///           - EIP-4626 Inflation Attack discussion (Ethereum Magicians).
+    ///           - OpenZeppelin v4.7+ ERC4626 virtual-shares change log.
+    ///           - Sonne Finance Oct 2022 post-mortem (~$20M, donation oracle).
+    function _decimalsOffset() internal pure override returns (uint8) {
+        return 6;
+    }
+
     /// @dev Internal deposit hook. Skeleton delegates to ERC4626. Future
     ///      overrides will add `_accountedAssets += assets`, attestation
     ///      verification, and pause check here, all before the super call.
