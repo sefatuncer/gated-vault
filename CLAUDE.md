@@ -10,7 +10,10 @@ ERC-4626 yield vault gated by W3C Verifiable Credentials. Compliant DeFi pattern
 
 ## DO NOT (kesin yasaklar)
 
-- **Claude-Code imzası eklenmez.** Hiçbir commit / blog / README / tweet'te `Co-Authored-By: Claude`, 🤖, "Generated with Claude Code" geçmez. Bu Sefa'nın projesi; imza yalnızca kişisel.
+- **Claude-Code imzası KESİNLİKLE YASAK.** Hiçbir bağlamda — git commit, push, branch ismi, PR/issue, blog post, README, tweet, LinkedIn, dev.to, mülakat materyali, video açıklaması, demo metni — `Co-Authored-By: Claude`, `Co-Authored-By: Anthropic`, `🤖`, "Generated with Claude Code", "Claude wrote this", "Built with Claude", "AI-assisted" gibi atıf/imza **geçmez**. Bu projenin **tek contributor'ı Sefa Tunçer**'dir.
+  - Git config zorunlu: `user.name = "Sefa Tunçer"`, `user.email = "tuncersefa@gmail.com"`. Başka author/committer kimliği kabul edilmez.
+  - Her commit sonrası doğrulama: `git log -1 --format='%an <%ae>%n%B'` çıktısında sadece Sefa görünmeli, "Claude" / "Anthropic" / "🤖" / "Generated with" pattern'lerinin **hiçbiri** olmamalı.
+  - Push öncesi son tarama: `git log --format='%B' origin/main..HEAD | grep -iE '(claude|anthropic|🤖|generated with|co-authored-by:)'` — sıfır match olmalı, varsa rebase ile temizlenir, push edilmez.
 - **`git add .` ve `git add -A` kullanılmaz.** Dosyalar tek tek stage edilir (kazara `.env`, `lib/`, `broadcast/`, `research/` commit'lenmesin).
 - **Mainnet'a deploy yok.** Sadece testnet. Mainnet RPC veya mainnet private key ortam değişkeni eklenmez.
 - **`research/` commit'lenmez.** `.gitignore`'da; paper, benchmark raw, social-evidence orada.
