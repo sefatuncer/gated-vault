@@ -10,23 +10,23 @@ ERC-4626 yield vault gated by W3C Verifiable Credentials. Compliant DeFi pattern
 
 ## DO NOT (kesin yasaklar)
 
-- **Claude-Code imzası KESİNLİKLE YASAK.** Hiçbir bağlamda — git commit, push, branch ismi, PR/issue, blog post, README, tweet, LinkedIn, dev.to, mülakat materyali, video açıklaması, demo metni — `Co-Authored-By: Claude`, `Co-Authored-By: Anthropic`, `🤖`, "Generated with Claude Code", "Claude wrote this", "Built with Claude", "AI-assisted" gibi atıf/imza **geçmez**. Bu projenin **tek contributor'ı Sefa Tunçer**'dir.
-  - **Kod içi izler dahil yasak:** Solidity custom error/event mesajları, `console.log`, `revert` mesajları, Bash `echo` log'ları, test trace'leri, NatSpec, `@author`, JSDoc, TS log mesajları, README banner'ları, error code'ları, tweet metni, X article, LinkedIn post, image prompt, demo script. Hiçbirinde "Claude", "Anthropic", "🤖" veya AI atıfı bulunmaz.
-  - **Emoji KESİNLİKLE YASAK.** Kod, dosya, commit mesajı, doc, README, NatSpec, Bash log/echo, test output, CLAUDE.md / `learn/` / `.claude/` / `research/` markdown'ları, tweet, image prompt, demo metni, chat yanıtı — **hiçbirinde** emoji geçmez. AI-çağrışımlı olanlar (🤖 🪄 ✨ 🚀 🎉) kesinlikle. Sözde fonksiyonel görünenler (✅ ❌ ⚠️ ⏳ 🟢 🔴 📌 ✨ 🎯 💡) de yasak — bunlar Claude'un proaktif alışkanlığı, Sefa'nın doğal yazımında yer almıyor. Yerine: düz kelime ("OK" / "fail" / "uyarı" / "TODO"), markdown checkbox (`[x]` / `[ ]`), veya hiç işaret koymayıp düz cümle.
+- **Claude-Code imzası KESİNLİKLE YASAK.** Hiçbir bağlamda — git commit, push, branch ismi, PR/issue, blog post, README, tweet, LinkedIn, dev.to, mülakat materyali, video açıklaması, demo metni — `Co-Authored-By: Claude`, `Co-Authored-By: Anthropic`, ``, "Generated with Claude Code", "Claude wrote this", "Built with Claude", "AI-assisted" gibi atıf/imza **geçmez**. Bu projenin **tek contributor'ı Sefa Tunçer**'dir.
+  - **Kod içi izler dahil yasak:** Solidity custom error/event mesajları, `console.log`, `revert` mesajları, Bash `echo` log'ları, test trace'leri, NatSpec, `@author`, JSDoc, TS log mesajları, README banner'ları, error code'ları, tweet metni, X article, LinkedIn post, image prompt, demo script. Hiçbirinde "Claude", "Anthropic", "" veya AI atıfı bulunmaz.
+  - **Emoji KESİNLİKLE YASAK.** Kod, dosya, commit mesajı, doc, README, NatSpec, Bash log/echo, test output, CLAUDE.md / `learn/` / `.claude/` / `research/` markdown'ları, tweet, image prompt, demo metni, chat yanıtı — **hiçbirinde** Unicode emoji glyph'i geçmez. AI-çağrışımlı semboller (robot, sihirli değnek, kıvılcım, roket, parti şapkası tarzı) kesinlikle. Sözde fonksiyonel görünenler (check / cross / warning üçgeni / hourglass / yeşil-kırmızı-mavi-sarı daire / push pin / target / ampul / fidan / ağaç / şeftali / ateş / göz / kalpli el / köprü / iplik / yıldız / inşaat işareti) de yasak — bunlar Claude'un proaktif alışkanlığı, Sefa'nın doğal yazımında yer almıyor. Yerine: düz kelime ("OK" / "fail" / "uyarı" / "TODO" / "WIP"), markdown checkbox (`[x]` / `[ ]`), veya hiç işaret koymayıp düz cümle.
   - **Claude AI-alışkanlıklarından uzak dur** (kod, doküman, **ve chat yanıtları dahil**). `.claude/social/humanize.md`'de listelenen AI-tell pattern'leri proje dokümantasyonu ve chat tonunda da geçerli:
     - **Yasak sözcükler:** leverage / utilize / delve / robust / comprehensive / seamless / elevate / unlock / foster / landscape (figüratif) / journey / embark / dive into / craft / streamline / cutting-edge / state-of-the-art.
     - **Yasak yapılar:** em dash bombası (>1 / paragraf), aşırı üçlü paralel ("X, Y, and Z" her cümlede), "Here's why ↓", "Let me explain", "In conclusion", "Crucially / Notably / Importantly", yapay coşku ("Excited to share", "Game changer", "Mind blown", "Absolutely insane").
-    - **Yasak açılışlar:** "Excited to share", "Strap in", "TIL", "Just published", "Thread 🧵" (hem emoji hem klişe).
+    - **Yasak açılışlar:** "Excited to share", "Strap in", "TIL", "Just published", "Thread " (hem emoji hem klişe).
     - **Yapısal kural:** kısa cümle varyansı, kısaltmalar açık (`I'm`, `don't`, `won't`), bir voice signature (zaman işareti / mikro itiraf / soru) — robotik tam-yapı tabakası değil.
   - Git config zorunlu: `user.name = "Sefa Tunçer"`, `user.email = "tuncersefa@gmail.com"`. Başka author/committer kimliği kabul edilmez.
-  - Her commit sonrası doğrulama: `git log -1 --format='%an <%ae>%n%B'` çıktısında sadece Sefa görünmeli, "Claude" / "Anthropic" / "🤖" / "Generated with" pattern'lerinin **hiçbiri** olmamalı.
+  - Her commit sonrası doğrulama: `git log -1 --format='%an <%ae>%n%B'` çıktısında sadece Sefa görünmeli, "Claude" / "Anthropic" / "" / "Generated with" pattern'lerinin **hiçbiri** olmamalı.
   - Push öncesi son tarama (commit mesajları **ve** dosya içerikleri) — **atıf-deseni odaklı precision grep**:
     ```
-    git log --format='%B' origin/main..HEAD | grep -iE '(co-authored-by:[[:space:]]*(claude|anthropic)|generated with claude|🤖|claude wrote|built with claude|ai-assisted by)'
-    git diff origin/main..HEAD -- ':!CLAUDE.md' ':!.claude/**/*.md' ':!learn/**/*.md' | grep -iE '(co-authored-by:[[:space:]]*(claude|anthropic)|generated with claude|🤖|claude wrote)'
+    git log --format='%B' origin/main..HEAD | grep -iE '(co-authored-by:[[:space:]]*(claude|anthropic)|generated with claude||claude wrote|built with claude|ai-assisted by)'
+    git diff origin/main..HEAD -- ':!CLAUDE.md' ':!.claude/**/*.md' ':!learn/**/*.md' | grep -iE '(co-authored-by:[[:space:]]*(claude|anthropic)|generated with claude||claude wrote)'
     ```
     Her iki tarama da sıfır match olmalı; aksi halde rebase / dosya temizlik yapılır, push edilmez.
-  - **Kural-tarif istisnası:** CLAUDE.md, `.claude/**/*.md` (solutions, social, todos), ve `learn/**/*.md` dosyalarında "Claude" / "Anthropic" / "Claude-Code" sözcükleri **kuralın kendisini tarif eden metin** olarak geçebilir (bu paragraf gibi). Ayrıca `.claude/` klasör adı ve `CLAUDE.md` dosya adı Claude Code convention'ı; değiştirilmez. **Atıf veya imza** (örn. `Co-Authored-By: Claude`, `🤖 generated`) hiçbir bağlamda geçmez.
+  - **Kural-tarif istisnası:** CLAUDE.md, `.claude/**/*.md` (solutions, social, todos), ve `learn/**/*.md` dosyalarında "Claude" / "Anthropic" / "Claude-Code" sözcükleri **kuralın kendisini tarif eden metin** olarak geçebilir (bu paragraf gibi). Ayrıca `.claude/` klasör adı ve `CLAUDE.md` dosya adı Claude Code convention'ı; değiştirilmez. **Atıf veya imza** (örn. `Co-Authored-By: Claude`, `generated`) hiçbir bağlamda geçmez.
 - **`git add .` ve `git add -A` kullanılmaz.** Dosyalar tek tek stage edilir (kazara `.env`, `lib/`, `broadcast/`, `research/` commit'lenmesin).
 - **Mainnet'a deploy yok.** Sadece testnet. Mainnet RPC veya mainnet private key ortam değişkeni eklenmez.
 - **`research/` commit'lenmez.** `.gitignore`'da; paper, benchmark raw, social-evidence orada.
@@ -110,7 +110,7 @@ test/             Foundry test (unit/, fuzz/, invariant/, integration/)
 script/deploy/    Forge Script (testnet deploy)
 verifier-service/ Credo TS + Fastify (off-chain VC verifier)
 
-research/         ⚠️ git-ignored — paper, benchmark raw, ADR, literature, social-evidence/
+research/         (git-ignored) — paper, benchmark raw, ADR, literature, social-evidence/
 learn/            mülakat-hazır pedagojik note'lar + interview-prep/ Q&A (public)
 ```
 
