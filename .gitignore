@@ -5,6 +5,10 @@ broadcast/
 !broadcast/**/*-latest.json
 foundry.lock
 
+# Gas snapshot — committed starting Phase 6 (todo-22 benchmark cycle).
+# Until then, every test addition would create regression noise.
+.gas-snapshot
+
 # Environment
 .env
 .env.*
