@@ -15,7 +15,13 @@ ERC-4626 yield vault gated by W3C Verifiable Credentials. Compliant DeFi pattern
   - **Emoji disiplini:** Kod, doc ve commit mesajlarında **AI-flavor emoji yok** (özellikle 🤖, 🪄, ✨ "AI sihir" çağrışımı). Fonksiyonel emoji (✅ ❌ ⚠️ 🔴) script log'larında ve checklist'lerde kabul; ama proaktif olarak eklenmez, sadece okur netliği için ihtiyaç varsa.
   - Git config zorunlu: `user.name = "Sefa Tunçer"`, `user.email = "tuncersefa@gmail.com"`. Başka author/committer kimliği kabul edilmez.
   - Her commit sonrası doğrulama: `git log -1 --format='%an <%ae>%n%B'` çıktısında sadece Sefa görünmeli, "Claude" / "Anthropic" / "🤖" / "Generated with" pattern'lerinin **hiçbiri** olmamalı.
-  - Push öncesi son tarama (commit mesajları **ve** dosya içerikleri): `git log --format='%B' origin/main..HEAD | grep -iE '(claude|anthropic|🤖|generated with|co-authored-by:)'` ve `git diff origin/main..HEAD | grep -iE '(claude|anthropic|🤖|generated with)'` — her iki tarama da sıfır match olmalı; aksi halde rebase / dosya temizlik yapılır, push edilmez.
+  - Push öncesi son tarama (commit mesajları **ve** dosya içerikleri) — **atıf-deseni odaklı precision grep**:
+    ```
+    git log --format='%B' origin/main..HEAD | grep -iE '(co-authored-by:[[:space:]]*(claude|anthropic)|generated with claude|🤖|claude wrote|built with claude|ai-assisted by)'
+    git diff origin/main..HEAD -- ':!CLAUDE.md' ':!.claude/**/*.md' ':!learn/**/*.md' | grep -iE '(co-authored-by:[[:space:]]*(claude|anthropic)|generated with claude|🤖|claude wrote)'
+    ```
+    Her iki tarama da sıfır match olmalı; aksi halde rebase / dosya temizlik yapılır, push edilmez.
+  - **Kural-tarif istisnası:** CLAUDE.md, `.claude/**/*.md` (solutions, social, todos), ve `learn/**/*.md` dosyalarında "Claude" / "Anthropic" / "Claude-Code" sözcükleri **kuralın kendisini tarif eden metin** olarak geçebilir (bu paragraf gibi). Ayrıca `.claude/` klasör adı ve `CLAUDE.md` dosya adı Claude Code convention'ı; değiştirilmez. **Atıf veya imza** (örn. `Co-Authored-By: Claude`, `🤖 generated`) hiçbir bağlamda geçmez.
 - **`git add .` ve `git add -A` kullanılmaz.** Dosyalar tek tek stage edilir (kazara `.env`, `lib/`, `broadcast/`, `research/` commit'lenmesin).
 - **Mainnet'a deploy yok.** Sadece testnet. Mainnet RPC veya mainnet private key ortam değişkeni eklenmez.
 - **`research/` commit'lenmez.** `.gitignore`'da; paper, benchmark raw, social-evidence orada.
