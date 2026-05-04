@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import { ERC4626 } from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import { ERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -20,6 +21,8 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 ///         pause logic at this exact insertion point so the public ERC-4626
 ///         interface stays untouched (composability with aggregators).
 contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     // -------- Yield: constants --------
 
     /// @notice Maximum permissible annual yield rate (basis points). 5_000 = 50% APY.
@@ -100,18 +103,85 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///         decision affecting all share holders. Bounded by
     ///         `MAX_YIELD_RATE` to limit owner abuse: a compromised key
     ///         cannot promise an unbounded yield and drain the reserve.
-    ///         **todo-12:** call `_harvest()` before the rate change so
-    ///         yield accrued under the old rate is realized first; otherwise
-    ///         pending yield is silently re-priced at the new rate.
+    ///         Pending yield under the old rate is realized via
+    ///         `_harvestYield()` first so the new rate cannot silently
+    ///         re-price yield that was already accrued.
     /// @param  newRate New rate in basis points (100 = 1% APY).
     function setYieldRate(uint256 newRate) external onlyOwner {
         if (newRate > MAX_YIELD_RATE) {
             revert YieldRateTooHigh(newRate, MAX_YIELD_RATE);
         }
-        // todo-12: _harvest() — flush pending yield under old rate first
+        _harvestYield();
         uint256 oldRate = yieldRate;
         yieldRate = newRate;
         emit YieldRateUpdated(oldRate, newRate);
+    }
+
+    // -------- Yield: accrual + harvest --------
+
+    /// @notice Yield accrued since the last harvest, in asset units.
+    /// @dev    Simple interest:
+    ///         `(principal × yieldRate × elapsed) / (10_000 × SECONDS_PER_YEAR)`
+    ///         Returns 0 when principal is zero (avoids meaningless math
+    ///         and a divide-by-zero-style result of pure constants).
+    /// @return The amount of asset that would be realized as principal if
+    ///         `harvest()` were called now.
+    function pendingYield() public view returns (uint256) {
+        if (principal == 0) return 0;
+        uint256 elapsed = block.timestamp - lastHarvest;
+        return (principal * yieldRate * elapsed) / (10_000 * SECONDS_PER_YEAR);
+    }
+
+    /// @notice Realizes accrued yield, increasing `principal` by the
+    ///         harvested amount. Anyone can call.
+    /// @dev    Pure accounting realization; no external value transfer.
+    ///         Exists so keepers / aggregators can flush state without
+    ///         needing the owner role. Bounded by available reserve so
+    ///         a yield-rate misconfiguration cannot mint principal that
+    ///         is not actually backed by tokens in the vault.
+    /// @return harvested The amount realized this call.
+    function harvest() external returns (uint256 harvested) {
+        return _harvestYield();
+    }
+
+    /// @notice Allows the owner to top up the yield reserve.
+    /// @dev    The reserve is the gap between the vault's asset balance and
+    ///         tracked `principal`. Donations to that gap are what the
+    ///         `harvest()` flow draws from. Trust assumption: only the
+    ///         owner is supposed to fund the reserve; documented in the
+    ///         README's Trust Assumptions section.
+    /// @param  amount Asset units to pull from the caller.
+    function depositYieldReserve(uint256 amount) external onlyOwner {
+        // Reserve is intentionally NOT added to `principal`: principal tracks
+        // user-deposited AUM, while the reserve is the buffer harvest draws
+        // against. Mixing the two would let donations inflate share price,
+        // which is the exact pattern the tracked-AUM rule (todo-13) prevents.
+        IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
+    }
+
+    /// @dev Internal harvest core. Bounded by available reserve so a
+    ///      yield rate that briefly exceeds reserve cannot mint principal
+    ///      that is not actually backed by tokens in the vault. Emits
+    ///      `YieldHarvested` only when something was realized.
+    function _harvestYield() internal returns (uint256 yield_) {
+        yield_ = pendingYield();
+        if (yield_ == 0) {
+            lastHarvest = block.timestamp;
+            return 0;
+        }
+
+        uint256 vaultBalance = IERC20(asset()).balanceOf(address(this));
+        uint256 reserve = vaultBalance > principal ? vaultBalance - principal : 0;
+
+        if (yield_ > reserve) {
+            yield_ = reserve;
+        }
+
+        if (yield_ > 0) {
+            principal += yield_;
+            emit YieldHarvested(yield_);
+        }
+        lastHarvest = block.timestamp;
     }
 
     /// @notice Decimals offset for inflation-attack defense.
@@ -130,16 +200,21 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         return 6;
     }
 
-    /// @dev Internal deposit hook. Skeleton delegates to ERC4626. Future
-    ///      overrides will add `_accountedAssets += assets`, attestation
-    ///      verification, and pause check here, all before the super call.
+    /// @dev Internal deposit hook. Realizes pending yield first so the new
+    ///      depositor mints shares against an up-to-date `totalAssets()`,
+    ///      then increments `principal` to track yield-excluded user AUM.
+    ///      Future overrides (todo-13) will replace `principal` tracking
+    ///      with a richer `_accountedAssets` accounting and attestation /
+    ///      pause checks at this exact insertion point.
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+        _harvestYield();
         super._deposit(caller, receiver, assets, shares);
+        principal += assets;
     }
 
-    /// @dev Internal withdraw hook. Skeleton delegates to ERC4626. Future
-    ///      overrides will add `_accountedAssets -= assets`, attestation
-    ///      freshness check, and pause check here, all before the super call.
+    /// @dev Internal withdraw hook. Realizes pending yield first so the
+    ///      withdrawer's share-to-asset conversion reflects yield earned
+    ///      up to this block, then decrements `principal`.
     function _withdraw(
         address caller,
         address receiver,
@@ -150,6 +225,8 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         internal
         override
     {
+        _harvestYield();
         super._withdraw(caller, receiver, owner_, assets, shares);
+        principal -= assets;
     }
 }

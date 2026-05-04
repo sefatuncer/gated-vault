@@ -132,4 +132,127 @@ contract GatedVaultTest is Test {
         vault.setYieldRate(newRate);
         assertEq(vault.yieldRate(), newRate, "rate updated");
     }
+
+    // -------- Yield mechanics + harvest (todo-12) --------
+
+    /// @dev Helper: Alice deposits `amount` USDC into the vault.
+    function _aliceDeposits(uint256 amount) internal returns (address alice, uint256 shares) {
+        alice = makeAddr("alice");
+        usdc.mint(alice, amount);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        shares = vault.deposit(amount, alice);
+        vm.stopPrank();
+    }
+
+    /// @dev Helper: owner tops up the yield reserve by `amount` USDC.
+    function _ownerFundsReserve(uint256 amount) internal {
+        usdc.mint(owner, amount);
+        vm.startPrank(owner);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.depositYieldReserve(amount);
+        vm.stopPrank();
+    }
+
+    function test_PendingYieldZeroBeforePrincipal() public view {
+        assertEq(vault.pendingYield(), 0, "yield must be zero with no principal");
+    }
+
+    function test_PendingYieldAccruesOverTime() public {
+        uint256 deposit = 100 * 10 ** usdc.decimals(); // 100 USDC
+        _aliceDeposits(deposit);
+
+        uint256 elapsed = 30 days;
+        vm.warp(block.timestamp + elapsed);
+
+        uint256 expected = (deposit * INITIAL_YIELD_RATE * elapsed) / (10_000 * vault.SECONDS_PER_YEAR());
+        assertEq(vault.pendingYield(), expected, "simple-interest accrual");
+        assertGt(expected, 0, "expected nonzero yield over 30d");
+    }
+
+    function test_HarvestUpdatesPrincipalAndTimestamp() public {
+        uint256 deposit = 100 * 10 ** usdc.decimals();
+        _aliceDeposits(deposit);
+
+        // Reserve large enough to absorb full pending yield
+        _ownerFundsReserve(50 * 10 ** usdc.decimals());
+
+        vm.warp(block.timestamp + 30 days);
+        uint256 expectedYield = vault.pendingYield();
+        assertGt(expectedYield, 0, "fixture must have nonzero pending yield");
+
+        uint256 harvestedAt = block.timestamp;
+        uint256 harvested = vault.harvest();
+
+        assertEq(harvested, expectedYield, "harvested amount matches preview");
+        assertEq(vault.principal(), deposit + expectedYield, "principal increased by yield");
+        assertEq(vault.lastHarvest(), harvestedAt, "lastHarvest stamped");
+        assertEq(vault.pendingYield(), 0, "no yield left to harvest immediately after");
+    }
+
+    function test_HarvestCappedByReserve() public {
+        uint256 deposit = 1000 * 10 ** usdc.decimals(); // 1000 USDC, large principal
+        _aliceDeposits(deposit);
+
+        // Owner funds only 1 USDC reserve — far less than 30d of yield on 1000 principal
+        uint256 smallReserve = 1 * 10 ** usdc.decimals();
+        _ownerFundsReserve(smallReserve);
+
+        vm.warp(block.timestamp + 30 days);
+
+        // Theoretical yield = 1000 × 0.05 × 30/365 ≈ 4.11 USDC, far above the 1 USDC reserve
+        uint256 theoretical = vault.pendingYield();
+        assertGt(theoretical, smallReserve, "fixture must over-promise yield");
+
+        uint256 harvested = vault.harvest();
+
+        assertEq(harvested, smallReserve, "harvest capped to available reserve");
+        assertEq(vault.principal(), deposit + smallReserve, "principal grew only by reserve cap");
+    }
+
+    function test_HarvestExternalCallableByAnyone() public {
+        uint256 deposit = 100 * 10 ** usdc.decimals();
+        _aliceDeposits(deposit);
+        _ownerFundsReserve(50 * 10 ** usdc.decimals());
+
+        vm.warp(block.timestamp + 30 days);
+
+        address keeper = makeAddr("keeper");
+        vm.prank(keeper);
+        uint256 harvested = vault.harvest();
+
+        assertGt(harvested, 0, "keeper-triggered harvest produced realization");
+    }
+
+    function test_DepositYieldReserveOnlyOwner() public {
+        // Pre-compute the argument; an inline expression like
+        // `50 * 10 ** usdc.decimals()` makes an external call that is consumed
+        // by vm.expectRevert before the actual depositYieldReserve call runs.
+        uint256 amount = 50 * 10 ** usdc.decimals();
+        address attacker = makeAddr("unauthCaller");
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
+        vault.depositYieldReserve(amount);
+    }
+
+    function test_SetYieldRateHarvestsBefore() public {
+        uint256 deposit = 100 * 10 ** usdc.decimals();
+        _aliceDeposits(deposit);
+        _ownerFundsReserve(50 * 10 ** usdc.decimals());
+
+        vm.warp(block.timestamp + 30 days);
+        uint256 oldRateYield = vault.pendingYield();
+        assertGt(oldRateYield, 0, "must have accrued under old rate");
+
+        // Owner changes the rate. Yield under the OLD rate must be realized first;
+        // otherwise it would be silently re-priced at the new (lower) rate.
+        uint256 newRate = 100; // 1% APY (down from 5%)
+        vm.prank(owner);
+        vault.setYieldRate(newRate);
+
+        // Old-rate yield is now in principal; pendingYield should be 0 immediately after
+        assertEq(vault.principal(), deposit + oldRateYield, "old-rate yield realized into principal");
+        assertEq(vault.pendingYield(), 0, "no yield carried over at new rate");
+        assertEq(vault.yieldRate(), newRate, "rate updated");
+    }
 }
