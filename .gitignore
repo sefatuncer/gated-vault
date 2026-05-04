@@ -1,0 +1,39 @@
+# Foundry
+out/
+cache/
+broadcast/
+!broadcast/**/*-latest.json
+foundry.lock
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+.logs/
+.ignore/
+
+# Node (verifier-service — Faz 4)
+node_modules/
+verifier-service/dist/
+verifier-service/.env
+
+# Coverage
+lcov.info
+coverage/
+
+# Project-specific (KRITIK — research lokal-only, GitHub'a push EDİLMEZ)
+research/
+
+# Claude Code kişisel ayarlar (sadece local; shared = .claude/settings.json)
+.claude/settings.local.json

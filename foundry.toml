@@ -1,0 +1,55 @@
+[profile.default]
+src = "contracts"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+cache_path = "cache"
+
+solc = "0.8.28"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+evm_version = "prague"
+
+# Test verbosity & gas
+verbosity = 2
+gas_reports = ["GatedVault", "IdentityVerifier", "Whitelist"]
+
+# Fuzz / invariant — Faz 1 başlangıç ayarı; ileride todo-17/66'da yükselir
+fuzz = { runs = 1000, seed = "0x1" }
+invariant = { runs = 100, depth = 50, fail_on_revert = false, call_override = false }
+
+# CI'da daha sıkı profil (todo-58'de aktif olur)
+[profile.ci]
+fuzz = { runs = 10000 }
+invariant = { runs = 1000, depth = 100 }
+verbosity = 3
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = true
+int_types = "long"
+multiline_func_header = "all"
+quote_style = "double"
+number_underscore = "thousands"
+wrap_comments = true
+ignore = ["lib/**"]
+
+[doc]
+out = "docs/natspec"
+title = "gated-vault"
+
+[rpc_endpoints]
+# Faz 9 (todo-78+) doldurulacak
+# sepolia = "${SEPOLIA_RPC_URL}"
+# base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+# arbitrum_sepolia = "${ARBITRUM_SEPOLIA_RPC_URL}"
+
+[etherscan]
+# Faz 9 doldurulacak
+# sepolia = { key = "${ETHERSCAN_API_KEY}" }
+
+# See more config options:
+# https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
