@@ -45,11 +45,17 @@ ERC-4626 yield vault gated by W3C Verifiable Credentials. Compliant DeFi pattern
 - `/social` çıktısı: `.claude/social/tweets/NN-slug.md` post paketi. **Humanize 3-pass zorunlu** (`.claude/social/humanize.md`). Faz 0-6 yayın yok, sadece draft. Sayısal iddia varsa kaynak: `research/social-evidence/`.
 - `/compound` çıktıları: `.claude/solutions/` (Claude için pattern) **+** `learn/` (Sefa için pedagojik teaching note + mülakat Q&A) **+** `progress.md` güncelleme.
 
-## Teaching Pass (`learn/` — public, mülakat-hazır)
+## Teaching Pass (`learn/` — local, mülakat-hazır)
 
-- `learn/` klasörü: konu bazlı 30-50 deep note + `interview-prep/` Q&A digest.
+- `learn/` klasörü gitignored (kişisel öğrenme + Q&A korpusu).
 - Her `/compound` adımında ilgili note(lar) güncellenir; topic uyumsuzsa skip ok.
-- Note'ların kalite yapısı: konsept → mekanizma → bizim kod → tuzak → mülakat sorusu → ileri okuma.
+- Note'ların kalite yapısı: konsept → mekanizma → bizim kod → tuzak → mülakat Q&A → ileri okuma.
+- **Bizim gerçekten yaşadığımıza odaklan, generic teori değil:**
+  - **Ne yaptık** (concrete eylem, dosya yolu, komut)
+  - **Nerede hata aldık** (versiyon farkı, linter warning, izin scope'u, platform incompatibility — gerçek hata mesajı yapıştır)
+  - **Nerede dikkat ettik / etmeli** (Adım 0 doğrulama, dependency pin, fmt source of truth, secret leak)
+  - **Mülakatta nasıl anlatırım** — 3-5 Q&A, kısa cevap (30 sn) + derin cevap (2-3 dk) + tuzak (mülakatçı follow-up'ı)
+- Şişirme yasak. Hedef 250-450 kelime / note. Jargon parantezli açıklanır. Tek note'a sığmayan konu ayrı dosyaya bölünür.
 - Detay: `learn/README.md` + `learn/INDEX.md`. Şablon: `learn/_template.md`.
 
 ## Environment Strategy (özet — detay: `.claude/solutions/env-strategy.md`)
