@@ -32,8 +32,13 @@ verifier-service/.env
 lcov.info
 coverage/
 
-# Project-specific (KRITIK — research lokal-only, GitHub'a push EDİLMEZ)
+# Project-specific — public repo'da tutulmaz
+# research/  : paper, benchmark raw, social-evidence, ADR (lokal-only)
+# .claude/   : todo roadmap, plan'lar, progress, social drafts, solutions,
+#              command tanımları, kişisel ayarlar (internal workflow,
+#              rakip için strategy ifşası)
+# learn/     : mülakat hazırlığı + Q&A korpusu (public olunca soru bankası
+#              daralır + ezber-cevap algısı yaratır)
 research/
-
-# Claude Code kişisel ayarlar (sadece local; shared = .claude/settings.json)
-.claude/settings.local.json
+.claude/
+learn/
