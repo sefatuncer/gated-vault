@@ -535,6 +535,118 @@ contract GatedVaultTest is Test {
         vault.redeem(shares, alice, alice);
     }
 
+    // -------- Yield distribution + rate change + edge cases (todo-16) --------
+
+    /// @dev Helper: deposits `amount` for a named address.
+    function _userDeposits(string memory label, uint256 amount) internal returns (address user, uint256 shares) {
+        user = makeAddr(label);
+        usdc.mint(user, amount);
+        vm.startPrank(user);
+        usdc.approve(address(vault), type(uint256).max);
+        shares = vault.deposit(amount, user);
+        vm.stopPrank();
+    }
+
+    function test_MultiUserProportionalYield() public {
+        uint256 unit = 10 ** usdc.decimals();
+        uint256 aliceAmount = 100 * unit;
+        uint256 bobAmount = 200 * unit;
+
+        // Both deposit at the same block — no fairness skew from timestamp.
+        (address alice, uint256 aliceShares) = _userDeposits("alice", aliceAmount);
+        (address bob, uint256 bobShares) = _userDeposits("bob", bobAmount);
+
+        _ownerFundsReserve(50 * unit);
+
+        vm.warp(block.timestamp + 365 days);
+
+        vm.prank(alice);
+        uint256 aliceBack = vault.redeem(aliceShares, alice, alice);
+        vm.prank(bob);
+        uint256 bobBack = vault.redeem(bobShares, bob, bob);
+
+        uint256 aliceYield = aliceBack - aliceAmount;
+        uint256 bobYield = bobBack - bobAmount;
+
+        // Bob deposited 2x Alice -> Bob yield should be ~2x Alice yield
+        assertApproxEqRel(bobYield, aliceYield * 2, 1e16, "Bob yield ~= 2x Alice yield");
+
+        // Total realized yield should be ~5% of total principal (300 * 0.05 = 15)
+        uint256 totalYield = aliceYield + bobYield;
+        assertApproxEqRel(totalYield, 15 * unit, 1e16, "total yield ~5% of total principal");
+    }
+
+    function test_LateDepositorGetsCorrectShare() public {
+        uint256 unit = 10 ** usdc.decimals();
+        uint256 amount = 100 * unit;
+
+        (address alice, uint256 aliceShares) = _userDeposits("alice", amount);
+        _ownerFundsReserve(50 * unit);
+
+        // Half a year passes -> Alice has accrued 2.5 USDC pending yield
+        vm.warp(block.timestamp + 182.5 days);
+
+        // Bob's deposit triggers _harvestYield, realizing Alice's pending yield
+        // into principal. Bob then mints shares against the post-harvest state.
+        (address bob, uint256 bobShares) = _userDeposits("bob", amount);
+
+        // Another half year passes
+        vm.warp(block.timestamp + 182.5 days);
+
+        vm.prank(alice);
+        uint256 aliceBack = vault.redeem(aliceShares, alice, alice);
+        vm.prank(bob);
+        uint256 bobBack = vault.redeem(bobShares, bob, bob);
+
+        uint256 aliceYield = aliceBack - amount;
+        uint256 bobYield = bobBack - amount;
+
+        // Alice was in for the full year, Bob only for the second half.
+        // Temporal fairness: Alice yield > Bob yield.
+        assertGt(aliceYield, bobYield, "earlier depositor accrues more yield");
+
+        // Bob's yield window is exactly half. Alice's window is full year on
+        // a principal that grew at the half-year mark; her yield is roughly
+        // 2x Bob's (within tolerance for the principal step at T+6m).
+        assertApproxEqRel(aliceYield, bobYield * 2, 5e16, "Alice yield ~2x Bob yield (5% tol)");
+    }
+
+    function test_HarvestEventEmittedWithAmount() public {
+        uint256 unit = 10 ** usdc.decimals();
+        uint256 amount = 100 * unit;
+        _userDeposits("alice", amount);
+        _ownerFundsReserve(50 * unit);
+
+        vm.warp(block.timestamp + 30 days);
+        uint256 expectedYield = vault.pendingYield();
+        assertGt(expectedYield, 0, "fixture must produce nonzero yield");
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit GatedVault.YieldHarvested(expectedYield);
+        vault.harvest();
+    }
+
+    function test_ZeroYieldRateNoAccrual() public {
+        uint256 unit = 10 ** usdc.decimals();
+        uint256 amount = 100 * unit;
+
+        // Owner sets the yield rate to zero before any deposit.
+        vm.prank(owner);
+        vault.setYieldRate(0);
+
+        (address alice, uint256 aliceShares) = _userDeposits("alice", amount);
+
+        // A full year goes by; with rate=0, no yield should accrue regardless.
+        vm.warp(block.timestamp + 365 days);
+        assertEq(vault.pendingYield(), 0, "zero rate must produce zero yield");
+
+        vm.prank(alice);
+        uint256 aliceBack = vault.redeem(aliceShares, alice, alice);
+
+        // Round-trip within 1 wei (only the offset-rounding drift remains).
+        assertApproxEqAbs(aliceBack, amount, 1, "redemption equals deposit at zero rate");
+    }
+
     function test_SetYieldRateHarvestsBefore() public {
         uint256 deposit = 100 * 10 ** usdc.decimals();
         _aliceDeposits(deposit);
