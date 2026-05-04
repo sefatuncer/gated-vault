@@ -414,6 +414,127 @@ contract GatedVaultTest is Test {
         vm.stopPrank();
     }
 
+    // -------- Withdraw flow (todo-15) --------
+
+    function test_WithdrawHappyPathNoYield() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        (address alice, uint256 shares) = _aliceDeposits(amount);
+
+        // No time elapsed, no yield. Round-trip should be near-perfect; the
+        // virtual-shares offset can leave a 1 wei drift from the rounding,
+        // which is the standard OZ behavior.
+        vm.prank(alice);
+        uint256 assetsBack = vault.redeem(shares, alice, alice);
+
+        assertApproxEqAbs(assetsBack, amount, 1, "round-trip deposit/redeem within 1 wei");
+        assertEq(vault.balanceOf(alice), 0, "all alice shares burned");
+        assertEq(vault.principal(), 0, "principal back to zero");
+    }
+
+    function test_WithdrawAfter30Days() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        uint256 reserveAmount = 50 * 10 ** usdc.decimals();
+        (address alice, uint256 shares) = _aliceDeposits(amount);
+        _ownerFundsReserve(reserveAmount);
+
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 expectedYield = (amount * INITIAL_YIELD_RATE * 30 days) / (10_000 * vault.SECONDS_PER_YEAR());
+        uint256 expectedTotal = amount + expectedYield;
+
+        vm.prank(alice);
+        uint256 assetsBack = vault.redeem(shares, alice, alice);
+
+        assertApproxEqRel(assetsBack, expectedTotal, 1e16, "30d yield match within 1%");
+    }
+
+    function test_WithdrawAfterYearReturnsYield() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        uint256 reserveAmount = 50 * 10 ** usdc.decimals();
+        (address alice, uint256 shares) = _aliceDeposits(amount);
+        _ownerFundsReserve(reserveAmount);
+
+        vm.warp(block.timestamp + 365 days);
+
+        // 5% APY * 100 USDC * 1 year = 5 USDC yield
+        uint256 expectedYield = 5 * 10 ** usdc.decimals();
+        uint256 expectedTotal = amount + expectedYield;
+
+        vm.prank(alice);
+        uint256 assetsBack = vault.redeem(shares, alice, alice);
+
+        assertApproxEqRel(assetsBack, expectedTotal, 1e16, "1-year 5% yield realized");
+    }
+
+    function test_WithdrawAllShares() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        (address alice, uint256 shares) = _aliceDeposits(amount);
+
+        uint256 maxRedeemable = vault.maxRedeem(alice);
+        assertEq(maxRedeemable, shares, "maxRedeem matches balance");
+
+        vm.prank(alice);
+        vault.redeem(maxRedeemable, alice, alice);
+
+        assertEq(vault.balanceOf(alice), 0, "all shares redeemed");
+        assertEq(vault.totalSupply(), 0, "total supply zero");
+    }
+
+    function test_WithdrawZeroReverts() public {
+        address alice = makeAddr("alice");
+        // No setup needed; ZeroAssets() rejects before any state read.
+        vm.prank(alice);
+        vm.expectRevert(GatedVault.ZeroAssets.selector);
+        vault.withdraw(0, alice, alice);
+    }
+
+    function test_WithdrawMoreThanBalanceReverts() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        (address alice, uint256 shares) = _aliceDeposits(amount);
+
+        uint256 tooMany = shares + 1;
+        uint256 maxR = vault.maxRedeem(alice);
+        vm.prank(alice);
+        // OZ v5 ERC4626 emits ERC4626ExceededMaxRedeem(owner, shares, max).
+        // We pre-compute selector + args to avoid the inline-call gotcha.
+        bytes memory expectedRevert =
+            abi.encodeWithSignature("ERC4626ExceededMaxRedeem(address,uint256,uint256)", alice, tooMany, maxR);
+        vm.expectRevert(expectedRevert);
+        vault.redeem(tooMany, alice, alice);
+    }
+
+    function test_WithdrawByApprovedSpender() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        (address alice, uint256 shares) = _aliceDeposits(amount);
+
+        address bob = makeAddr("bob");
+        address charlie = makeAddr("charlie");
+
+        // Alice approves Bob to spend her vault shares (ERC-4626 share is ERC-20).
+        vm.prank(alice);
+        vault.approve(bob, shares);
+
+        // Bob redeems Alice's shares, sends asset to Charlie.
+        vm.prank(bob);
+        uint256 assetsBack = vault.redeem(shares, charlie, alice);
+
+        assertEq(usdc.balanceOf(charlie), assetsBack, "charlie received asset");
+        assertEq(vault.balanceOf(alice), 0, "alice shares burned");
+        assertEq(vault.allowance(alice, bob), 0, "allowance fully spent");
+    }
+
+    function test_WithdrawEmitsEvent() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        (address alice, uint256 shares) = _aliceDeposits(amount);
+
+        uint256 expectedAssets = vault.previewRedeem(shares);
+
+        vm.prank(alice);
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit IERC4626.Withdraw(alice, alice, alice, expectedAssets, shares);
+        vault.redeem(shares, alice, alice);
+    }
+
     function test_SetYieldRateHarvestsBefore() public {
         uint256 deposit = 100 * 10 ** usdc.decimals();
         _aliceDeposits(deposit);
