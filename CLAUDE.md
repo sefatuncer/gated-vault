@@ -170,7 +170,19 @@ forge script script/deploy/<Name>.s.sol \
 - **Rounding direction**: ERC-4626 boundary'lerinde **vault lehine** (Floor on share-mint, Ceil on share-burn).
 - **EIP-712 typed data** off-chain imza için; çıplak `eth_sign`/EIP-191 kullanılmaz.
 - **Replay protection**: nonce + chainId + domain separator zorunlu off-chain → on-chain bridging'de.
+- **Toxic asset reject**: vault deploy-time `supportsInterface(0xe58e113c)` ile **ERC-777 reject** (Imbtc dForce 2020, $25M reentrancy). Fee-on-transfer / rebase token detection: deploy-time `try { token.balanceOf(self) }` pre-call/post-call diff testi; tespitte reject.
+- **Tracked AUM accounting**: `totalAssets()` override + `_accountedAssets` (Sonne 2022 $20M, Cream 2021 $130M donation oracle). Naive `balanceOf(self)` yasak.
+- **Inflation defense**: `_decimalsOffset()` ≥ 6 (USDC) + atomic first-deposit seed (deploy script tek tx).
+- **Centralization disclosure**: owner/admin'in ne yapabildiği README'de explicit liste (transferOwnership, harvest, pause, fee-set vb.). "Trust assumptions" bölümü zorunlu.
 - **NatSpec**: `@title`, `@author "Sefa Tunçer"`, `@notice`, `@dev`, `@param`, `@return`. Public/external'da %100.
+
+## Security Disiplini
+
+- **Threat-model-first.** Her security aracı / test / kontrol gerekçeli olmalı; "audit-grade checklist" performative kullanılmaz. Yeni güvenlik kontrolü eklerken "hangi attack vector'unu kapatıyor" sorusu cevaplanmadan eklenmez.
+- **"Production-ready"** = mainnet kalitesinde testnet artefakt. Mainnet deploy YOK ama kod mainnet-grade: testnet için her bypass ("şimdilik permissive", "test'te geçici", "todo'da") yasak. İlk yazım son yazımdır.
+- **Modern auditor stack** (2026): **Slither** (static, fast) + **Aderyn** (Solidity-aware static, Rust) + **Halmos** (symbolic, k-induction) + **Foundry invariant + handler** (stateful fuzz). Mythril deprecated; bizim stack dışı.
+- **Defense in depth**: tek kontrol noktası yok. Inflation defense üç katman (decimals offset + tracked accounted + atomic seed); replay protection üç parça (nonce + chainId + domain separator); reentrancy iki katman (CEI sırası + ReentrancyGuard).
+- **Audit-readiness ≠ audit**. Audit firmasıyla anlaşma yapılana kadar kod self-audit + threat-model + slither/aderyn/halmos clean kalır; bunlar "audit yerine geçer" kabul edilmez.
 
 ---
 
