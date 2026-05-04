@@ -2,8 +2,10 @@
 pragma solidity 0.8.28;
 
 import { Test } from "forge-std/Test.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import { IERC20, IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import { IERC20Errors } from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import { MockUSDC } from "../../contracts/mocks/MockUSDC.sol";
 import { MockERC777 } from "../../contracts/mocks/MockERC777.sol";
 import { GatedVault } from "../../contracts/GatedVault.sol";
@@ -290,6 +292,126 @@ contract GatedVaultTest is Test {
         MockERC777 erc777 = new MockERC777();
         vm.expectRevert(GatedVault.ERC777NotSupported.selector);
         new GatedVault(IERC20Metadata(address(erc777)), owner, INITIAL_YIELD_RATE);
+    }
+
+    // -------- Deposit flow (todo-14) --------
+
+    function test_FirstDepositMintsCorrectShares() public {
+        // Virtual-shares math at first deposit:
+        //   shares = assets * (totalSupply + 10^offset) / (totalAssets + 1)
+        //          = assets * 10^6 / 1
+        // For 100 USDC = 100e6 wei, expected = 1e14 shares.
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        (, uint256 shares) = _aliceDeposits(amount);
+
+        uint256 expected = amount * (10 ** 6); // virtual-shares scale
+        assertEq(shares, expected, "first deposit shares math");
+    }
+
+    function test_SecondDepositProportionalShares() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        (, uint256 aliceShares) = _aliceDeposits(amount);
+
+        // Bob deposits the same amount immediately — no yield elapsed.
+        // Bob's shares should be approximately equal to Alice's.
+        address bob = makeAddr("bob");
+        usdc.mint(bob, amount);
+        vm.startPrank(bob);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 bobShares = vault.deposit(amount, bob);
+        vm.stopPrank();
+
+        // Tolerance: 0.01% — second-depositor sees one extra unit of accounted
+        // assets vs supply, so shares can drift by a wei-level amount.
+        assertApproxEqRel(bobShares, aliceShares, 1e14, "equal-deposit shares within tolerance");
+    }
+
+    function test_DepositZeroReverts() public {
+        address alice = makeAddr("alice");
+        usdc.mint(alice, 100 * 10 ** usdc.decimals());
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(GatedVault.ZeroAssets.selector);
+        vault.deposit(0, alice);
+        vm.stopPrank();
+    }
+
+    function test_DepositMaxUint256Reverts() public {
+        // The math `assets * (totalSupply + 10^offset)` overflows uint256
+        // when assets is type(uint256).max. Solidity 0.8+ checked arithmetic
+        // panics with the well-known 0x11 selector.
+        address alice = makeAddr("alice");
+        // Mint full uint256 supply isn't realistic, but the math overflow is
+        // checked before the transferFrom path even runs.
+        usdc.mint(alice, type(uint128).max);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(); // Panic(0x11) arithmetic overflow
+        vault.deposit(type(uint256).max, alice);
+        vm.stopPrank();
+    }
+
+    function test_DepositToReceiver() public {
+        address alice = makeAddr("alice");
+        address bob = makeAddr("bob");
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        usdc.mint(alice, amount);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.deposit(amount, bob);
+        vm.stopPrank();
+
+        // Alice paid the asset, Bob received the shares.
+        assertEq(usdc.balanceOf(alice), 0, "alice asset spent");
+        assertEq(vault.balanceOf(bob), shares, "bob received shares");
+        assertEq(vault.balanceOf(alice), 0, "alice received no shares");
+    }
+
+    function test_DepositEmitsEvent() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        uint256 expectedShares = vault.previewDeposit(amount);
+        usdc.mint(alice, amount);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit IERC4626.Deposit(alice, alice, amount, expectedShares);
+        vault.deposit(amount, alice);
+        vm.stopPrank();
+    }
+
+    function test_DepositTransferFromCaller() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        usdc.mint(alice, amount);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(amount, alice);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(alice), aliceBefore - amount, "alice balance debit");
+        assertEq(usdc.balanceOf(address(vault)), vaultBefore + amount, "vault balance credit");
+    }
+
+    function test_DepositRevertsInsufficientApproval() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        uint256 capped = 50 * 10 ** usdc.decimals();
+        usdc.mint(alice, amount);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), capped);
+        vm.expectRevert(
+            abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(vault), capped, amount)
+        );
+        vault.deposit(amount, alice);
+        vm.stopPrank();
     }
 
     function test_SetYieldRateHarvestsBefore() public {

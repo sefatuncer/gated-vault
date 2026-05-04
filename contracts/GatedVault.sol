@@ -71,6 +71,14 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///         plain ERC-20) via low-level staticcall.
     error ERC777NotSupported();
 
+    /// @notice Reverts on a zero-asset deposit or withdraw.
+    /// @dev    ERC-4626 does not forbid zero amounts, but they are pure
+    ///         gas waste and event spam: a successful zero-deposit emits
+    ///         a meaningless `Deposit` log that off-chain indexers must
+    ///         either count or filter. Audit-grade vaults (Yearn V3,
+    ///         Morpho) reject at the boundary.
+    error ZeroAssets();
+
     /// @notice Emitted when the yield rate changes.
     event YieldRateUpdated(uint256 oldRate, uint256 newRate);
 
@@ -237,20 +245,20 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         return 6;
     }
 
-    /// @dev Internal deposit hook. Realizes pending yield first so the new
-    ///      depositor mints shares against an up-to-date `totalAssets()`,
-    ///      then increments `principal` to track yield-excluded user AUM.
-    ///      Future overrides (todo-13) will replace `principal` tracking
-    ///      with a richer `_accountedAssets` accounting and attestation /
-    ///      pause checks at this exact insertion point.
+    /// @dev Internal deposit hook. Rejects zero-amount calls, then realizes
+    ///      pending yield so the new depositor mints shares against an
+    ///      up-to-date `totalAssets()`, and finally increments tracked
+    ///      `principal`. Future overrides will add VC attestation checks
+    ///      and pause logic at this exact insertion point.
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+        if (assets == 0) revert ZeroAssets();
         _harvestYield();
         super._deposit(caller, receiver, assets, shares);
         principal += assets;
     }
 
-    /// @dev Internal withdraw hook. Realizes pending yield first so the
-    ///      withdrawer's share-to-asset conversion reflects yield earned
+    /// @dev Internal withdraw hook. Rejects zero-amount calls, realizes
+    ///      pending yield so share-to-asset conversion reflects accrual
     ///      up to this block, then decrements `principal`.
     function _withdraw(
         address caller,
@@ -262,6 +270,7 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         internal
         override
     {
+        if (assets == 0) revert ZeroAssets();
         _harvestYield();
         super._withdraw(caller, receiver, owner_, assets, shares);
         principal -= assets;
