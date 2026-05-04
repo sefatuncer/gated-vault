@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/sefatuncer/gated-vault/security/advisories/new
+    about: Please report security issues privately. See SECURITY.md for the policy.
+
+  - name: General question or discussion
+    url: https://github.com/sefatuncer/gated-vault/discussions
+    about: Discussions are not yet enabled (planned for Phase 11). For now, open a feature request issue or email tuncersefa@gmail.com.
