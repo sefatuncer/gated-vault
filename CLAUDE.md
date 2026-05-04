@@ -45,17 +45,20 @@ ERC-4626 yield vault gated by W3C Verifiable Credentials. Compliant DeFi pattern
 - `/social` çıktısı: `.claude/social/tweets/NN-slug.md` post paketi. **Humanize 3-pass zorunlu** (`.claude/social/humanize.md`). Faz 0-6 yayın yok, sadece draft. Sayısal iddia varsa kaynak: `research/social-evidence/`.
 - `/compound` çıktıları: `.claude/solutions/` (Claude için pattern) **+** `learn/` (Sefa için pedagojik teaching note + mülakat Q&A) **+** `progress.md` güncelleme.
 
-## Teaching Pass (`learn/` — local, mülakat-hazır)
+## Teaching Pass (`learn/` — local, Blockchain Developer mülakat-hazır)
 
-- `learn/` klasörü gitignored (kişisel öğrenme + Q&A korpusu).
+- `learn/` klasörü gitignored (kişisel öğrenme + teknik mülakat korpusu).
 - Her `/compound` adımında ilgili note(lar) güncellenir; topic uyumsuzsa skip ok.
-- Note'ların kalite yapısı: konsept → mekanizma → bizim kod → tuzak → mülakat Q&A → ileri okuma.
-- **Bizim gerçekten yaşadığımıza odaklan, generic teori değil:**
-  - **Ne yaptık** (concrete eylem, dosya yolu, komut)
-  - **Nerede hata aldık** (versiyon farkı, linter warning, izin scope'u, platform incompatibility — gerçek hata mesajı yapıştır)
-  - **Nerede dikkat ettik / etmeli** (Adım 0 doğrulama, dependency pin, fmt source of truth, secret leak)
-  - **Mülakatta nasıl anlatırım** — 3-5 Q&A, kısa cevap (30 sn) + derin cevap (2-3 dk) + tuzak (mülakatçı follow-up'ı)
-- Şişirme yasak. Hedef 250-450 kelime / note. Jargon parantezli açıklanır. Tek note'a sığmayan konu ayrı dosyaya bölünür.
+- **Operasyonel günlük yasak:** "ne yaptık, dosya yolu, komut, push ladık, hata mesajını yapıştır" formatı **learn/ dışı** — bunlar `progress.md` ve `.claude/solutions/`'a gider. `learn/` notları **konsept derinliği** taşır.
+- **Zorunlu teknik depth yapısı:**
+  1. **TL;DR** — mülakatta 30 saniyede ne anlatırsın
+  2. **Tarihsel bağlam** — bu konsept ne zaman, kim, neden çıkardı? Hangi acıyı çözdü?
+  3. **Spec / Mekanizma** — adım adım, EVM seviyesinde (opcode, storage layout, gas profili, state transition). Diagram ASCII art ok.
+  4. **Implementation patterns** — OZ vs Solady vs custom; trade-off'lar (gas, audit history, API surface); ne zaman hangisi.
+  5. **Bug history / real incidents** — bu konsepte bağlı protokoller hangi hatadan kaybetti? (örn. Sushiswap, Sonne, Imbtc, MultiSig 2017). Vector + lesson.
+  6. **Mülakat Q&A** — 4-7 soru, **junior / mid / senior** dengesi + en az 1 whiteboard (kod yazma) sorusu. Format: kısa cevap (30 sn sözel) + derin cevap (2-3 dk) + mülakatçı tuzağı (follow-up'ta sıklıkla nereye dönüyor).
+- "Bizim cycle'da yaptık" satırları **yasak**. Eğer cycle deneyimi konsepti aydınlatıyorsa 1-2 cümle anchor olabilir, ana içerik değil.
+- Hedef 600-1500 kelime / note (teknik depth zorunlu kıldığı için). Şişirme yine yasak; her cümle bilgi taşımalı, jargon parantezli açıklanır.
 - Detay: `learn/README.md` + `learn/INDEX.md`. Şablon: `learn/_template.md`.
 
 ## Environment Strategy (özet — detay: `.claude/solutions/env-strategy.md`)
