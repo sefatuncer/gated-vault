@@ -3,21 +3,24 @@ pragma solidity 0.8.28;
 
 import { Test } from "forge-std/Test.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { MockUSDC } from "../../contracts/mocks/MockUSDC.sol";
 import { GatedVault } from "../../contracts/GatedVault.sol";
 
-/// @title  GatedVaultTest (skeleton smoke tests)
-/// @notice Constructor and metadata sanity checks for the empty vault shell.
-///         Deposit/withdraw flow, decimals offset, yield, and VC-gating
-///         tests live in later todo-specific test files.
+/// @title  GatedVaultTest
+/// @notice Unit tests for the vault: construction metadata, inflation defense,
+///         and yield-rate state surface (todo-11). Deposit/withdraw flow,
+///         pendingYield math, and VC-gating tests live in later test files.
 contract GatedVaultTest is Test {
+    uint256 internal constant INITIAL_YIELD_RATE = 500; // 5% APY (basis points)
+
     MockUSDC internal usdc;
     GatedVault internal vault;
     address internal owner = makeAddr("owner");
 
     function setUp() public {
         usdc = new MockUSDC();
-        vault = new GatedVault(IERC20Metadata(address(usdc)), owner);
+        vault = new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE);
     }
 
     function test_DeployedWithCorrectName() public view {
@@ -89,5 +92,44 @@ contract GatedVaultTest is Test {
         // pre-tracked-AUM regime; full ~99% expected after todo-13.
         uint256 victimRedemption = vault.previewRedeem(victimShares);
         assertGe(victimRedemption, victimDeposit / 2, "victim redemption catastrophically diluted");
+    }
+
+    // -------- Yield state surface (todo-11) --------
+
+    function test_YieldRateInitializedCorrectly() public view {
+        assertEq(vault.yieldRate(), INITIAL_YIELD_RATE, "initial yield rate");
+        assertEq(vault.MAX_YIELD_RATE(), 5000, "max yield rate constant");
+        assertEq(vault.SECONDS_PER_YEAR(), 365 days, "seconds per year constant");
+        assertEq(vault.lastHarvest(), block.timestamp, "lastHarvest set at construction");
+        assertEq(vault.principal(), 0, "principal zero before any deposit");
+    }
+
+    function test_ConstructorRevertsAboveMax() public {
+        uint256 tooHigh = 5001;
+        vm.expectRevert(abi.encodeWithSelector(GatedVault.YieldRateTooHigh.selector, tooHigh, 5000));
+        new GatedVault(IERC20Metadata(address(usdc)), owner, tooHigh);
+    }
+
+    function test_SetYieldRateRevertsAboveMax() public {
+        uint256 tooHigh = 5001;
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(GatedVault.YieldRateTooHigh.selector, tooHigh, 5000));
+        vault.setYieldRate(tooHigh);
+    }
+
+    function test_SetYieldRateOnlyOwner() public {
+        address nonOwner = makeAddr("nonOwner");
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
+        vault.setYieldRate(1000);
+    }
+
+    function test_SetYieldRateEmitsEvent() public {
+        uint256 newRate = 1000; // 10% APY
+        vm.prank(owner);
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit GatedVault.YieldRateUpdated(INITIAL_YIELD_RATE, newRate);
+        vault.setYieldRate(newRate);
+        assertEq(vault.yieldRate(), newRate, "rate updated");
     }
 }
