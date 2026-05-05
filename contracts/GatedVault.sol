@@ -117,6 +117,7 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         // ERC-1820 registry probing is the more "canonical" path; this
         // staticcall variant is dependency-free and sufficient for the
         // standard ERC-777 implementations in the wild.
+        // slither-disable-next-line low-level-calls
         (bool isERC777,) = address(asset_).staticcall(abi.encodeWithSignature("granularity()"));
         if (isERC777) {
             revert ERC777NotSupported();
