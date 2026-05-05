@@ -52,4 +52,92 @@ contract GatedVaultFuzzTest is Test {
         assertEq(vault.balanceOf(alice), 0, "alice shares burned");
         assertEq(vault.principal(), 0, "principal back to zero");
     }
+
+    /// @notice Realized yield from `harvest()` is always bounded by both the
+    ///         pre-harvest reserve and the pre-harvest pendingYield.
+    /// @dev    The reserve is `vault balance − tracked principal`. The
+    ///         `_harvestYield` core caps the in-flight `yield_` to
+    ///         `min(pending, reserve)` before mutating principal. Five
+    ///         invariants exercised:
+    ///           1. principal delta == harvest() return value (state vs ABI),
+    ///           2. harvested ≤ reserveBefore (reserve cap),
+    ///           3. harvested ≤ pendingBefore (pending upper bound),
+    ///           4. pendingYield() resets to zero (lastHarvest stamped),
+    ///           5. vault balance unchanged (harvest is pure accounting).
+    ///         3-D fuzz: deposit ∈ [1 USDC, 1M USDC], reserve ∈ [0, 1M USDC]
+    ///         (zero is the kill-switch path), elapsed ∈ [1s, 10y].
+    function testFuzz_PendingYieldReserveBounded(
+        uint256 depositAmount,
+        uint256 reserveAmount,
+        uint256 timeJump
+    )
+        public
+    {
+        depositAmount = bound(depositAmount, 1e6, 1_000_000e6);
+        reserveAmount = bound(reserveAmount, 0, 1_000_000e6);
+        timeJump = bound(timeJump, 1, 365 days * 10);
+
+        usdc.mint(alice, depositAmount);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), depositAmount);
+        vault.deposit(depositAmount, alice);
+        vm.stopPrank();
+
+        if (reserveAmount > 0) {
+            usdc.mint(owner, reserveAmount);
+            vm.startPrank(owner);
+            usdc.approve(address(vault), reserveAmount);
+            vault.depositYieldReserve(reserveAmount);
+            vm.stopPrank();
+        }
+
+        vm.warp(block.timestamp + timeJump);
+
+        uint256 principalBefore = vault.principal();
+        uint256 vaultBalBefore = usdc.balanceOf(address(vault));
+        // Vault balance is principal (deposits) plus reserve (donations through
+        // the documented entry point); subtraction can never underflow because
+        // tracked principal is never inflated past balance by construction.
+        uint256 reserveBefore = vaultBalBefore - principalBefore;
+        uint256 pendingBefore = vault.pendingYield();
+
+        uint256 harvested = vault.harvest();
+
+        uint256 realized = vault.principal() - principalBefore;
+
+        assertEq(realized, harvested, "principal delta != harvested return");
+        assertLe(harvested, reserveBefore, "harvest exceeded reserve");
+        assertLe(harvested, pendingBefore, "harvest exceeded pending");
+        assertEq(vault.pendingYield(), 0, "pending must reset post-harvest");
+        assertEq(usdc.balanceOf(address(vault)), vaultBalBefore, "balance moved during pure-accounting harvest");
+    }
+
+    /// @notice `pendingYield()` simple-interest math stays inside uint256 even
+    ///         under inputs orders of magnitude beyond any realistic supply.
+    /// @dev    Worst-case product: principal × yieldRate × elapsed. With
+    ///         principal up to type(uint128).max (~3.4e38), yieldRate = 500
+    ///         (5% APY fixture), and elapsed up to a century (~3.15e9 s),
+    ///         the numerator tops out near 5.4e50 — uint256 ceiling is 1.16e77,
+    ///         leaving ~26 decimal digits of headroom. This test pins that
+    ///         bound: a future refactor that drops the divide-last ordering
+    ///         (or widens precision unsafely) would surface here as a Panic.
+    ///         Sanity assert: pending ≤ deposit × 5 (5% APY for 100 years).
+    function testFuzz_NoOverflowInYieldCalc(uint256 depositAmount, uint256 timeJump) public {
+        depositAmount = bound(depositAmount, 1e6, type(uint128).max);
+        timeJump = bound(timeJump, 0, 365 days * 100);
+
+        usdc.mint(alice, depositAmount);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), depositAmount);
+        vault.deposit(depositAmount, alice);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + timeJump);
+
+        // Must not panic with arithmetic overflow.
+        uint256 pending = vault.pendingYield();
+
+        // Sanity: bounded by 5% APY × 100 years = 5x principal.
+        assertLe(pending, depositAmount * 5, "pending wildly above sanity bound");
+    }
 }
