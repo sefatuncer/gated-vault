@@ -10,16 +10,19 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 
 /// @title  GatedVault
 /// @author Sefa Tunçer
-/// @notice ERC-4626 yield vault skeleton. Yield mechanics, decimals offset
-///         (inflation defense), and Verifiable Credential gating are added
-///         in subsequent atomic todos (10, 11, 12, 30+).
-/// @dev    This is the policy-free shape: standard ERC-4626 surface, vanilla
-///         deposit/withdraw, owner role reserved for harvest/pause logic
-///         introduced later. The internal `_deposit` and `_withdraw` hooks
-///         delegate straight to ERC4626 super-calls; future overrides will
-///         add accounting (`_accountedAssets`), VC attestation checks, and
-///         pause logic at this exact insertion point so the public ERC-4626
-///         interface stays untouched (composability with aggregators).
+/// @notice ERC-4626 yield vault. Active defenses: simple-interest yield
+///         with reserve-bounded harvest, virtual-shares decimals offset
+///         (inflation defense), tracked-AUM `totalAssets` (donation oracle
+///         defense), and constructor-time ERC-777 reject (toxic-asset
+///         filter). Verifiable Credential gating ships in Faz 3 (todos
+///         30+); the public ERC-4626 surface stays untouched so aggregator
+///         composability is preserved.
+/// @dev    The internal `_deposit` and `_withdraw` hooks already realize
+///         pending yield (temporal fairness across depositors) and update
+///         tracked `principal`. VC attestation checks and pause logic plug
+///         into the same hook insertion points without disturbing the
+///         standard ERC-4626 ABI. Owner role is reserved for `setYieldRate`
+///         (bounded by `MAX_YIELD_RATE`) and `depositYieldReserve`.
 contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -45,15 +48,18 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     uint256 public yieldRate;
 
     /// @notice Block timestamp of the last yield realization (harvest).
-    /// @dev    Pending yield accrual is computed off `block.timestamp - lastHarvest`
-    ///         in todo-12. Construction sets this to deploy time so the first
-    ///         depositor does not retroactively accrue yield.
+    /// @dev    Pending yield accrues as `block.timestamp - lastHarvest`.
+    ///         Construction sets this to deploy time so the first depositor
+    ///         does not retroactively accrue yield.
     uint256 public lastHarvest;
 
     /// @notice Total user-deposited principal (yield excluded).
-    /// @dev    `totalAssets()` will be `principal + pendingYield()` in todo-13.
-    ///         Tracked explicitly so external donations to the vault do not
-    ///         warp share price (Sonne Finance Oct 2022 attack class).
+    /// @dev    `totalAssets()` returns `principal + pendingYield()`. Tracked
+    ///         explicitly so external donations to the vault do not warp
+    ///         share price (Sonne Finance Oct 2022 donation oracle attack
+    ///         class). Mutates only at documented entry points: `_deposit`
+    ///         (`+= assets`), `_withdraw` (`-= assets`), `_harvestYield`
+    ///         (`+= realized`).
     uint256 public principal;
 
     // -------- Yield: errors / events --------
@@ -80,9 +86,12 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     error ZeroAssets();
 
     /// @notice Emitted when the yield rate changes.
+    /// @param oldRate Previous rate (basis points).
+    /// @param newRate New rate (basis points).
     event YieldRateUpdated(uint256 oldRate, uint256 newRate);
 
     /// @notice Emitted when accrued yield is realized as principal.
+    /// @param amount Yield realized in this harvest, in asset units.
     event YieldHarvested(uint256 amount);
 
     /// @notice Construct the vault around an underlying ERC-20 asset.
@@ -209,6 +218,7 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///      yield rate that briefly exceeds reserve cannot mint principal
     ///      that is not actually backed by tokens in the vault. Emits
     ///      `YieldHarvested` only when something was realized.
+    /// @return yield_ Asset units realized as principal in this call.
     function _harvestYield() internal returns (uint256 yield_) {
         yield_ = pendingYield();
         if (yield_ == 0) {
@@ -251,6 +261,10 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///      up-to-date `totalAssets()`, and finally increments tracked
     ///      `principal`. Future overrides will add VC attestation checks
     ///      and pause logic at this exact insertion point.
+    /// @param caller   ERC-4626 caller (msg.sender of the public entry point).
+    /// @param receiver Address that receives the minted shares.
+    /// @param assets   Asset units pulled from caller, added to `principal`.
+    /// @param shares   Share units minted to receiver (precomputed by ERC-4626 super).
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
         if (assets == 0) revert ZeroAssets();
         _harvestYield();
@@ -261,6 +275,11 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     /// @dev Internal withdraw hook. Rejects zero-amount calls, realizes
     ///      pending yield so share-to-asset conversion reflects accrual
     ///      up to this block, then decrements `principal`.
+    /// @param caller   ERC-4626 caller (msg.sender of the public entry point).
+    /// @param receiver Address that receives the underlying asset.
+    /// @param owner_   Share holder being charged for the withdrawal.
+    /// @param assets   Asset units sent to receiver, subtracted from `principal`.
+    /// @param shares   Share units burned from `owner_` (precomputed by ERC-4626 super).
     function _withdraw(
         address caller,
         address receiver,

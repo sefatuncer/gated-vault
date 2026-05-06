@@ -14,12 +14,18 @@ import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 ///         April 2020, $25M loss). For the vault's reject test, the
 ///         existence of `granularity()` is the detection signal — the hook
 ///         itself does not need to be implemented.
+/// @dev    Test-only fixture. Not deployable to production. The vault's
+///         constructor probes `granularity()` via low-level staticcall;
+///         success identifies the asset as ERC-777-flavored and the vault
+///         reverts with `ERC777NotSupported`. See `GatedVault` constructor
+///         for the detection path.
 contract MockERC777 is ERC20 {
     constructor() ERC20("Mock ERC777", "M777") { }
 
     /// @notice ERC-777 mandatory: minimum increment by which token amounts
     ///         must be transferable. Returning 1 means "any amount", which
     ///         is the most common real-world value.
+    /// @return The granularity (1, meaning any amount is transferable).
     function granularity() external pure returns (uint256) {
         return 1;
     }
