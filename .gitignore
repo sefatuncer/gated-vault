@@ -5,9 +5,10 @@ broadcast/
 !broadcast/**/*-latest.json
 foundry.lock
 
-# Gas snapshot — committed starting Phase 6 (todo-22 benchmark cycle).
-# Until then, every test addition would create regression noise.
-.gas-snapshot
+# Gas snapshot — tracked starting todo-22 (Faz 1 closeout). The file is now
+# the regression baseline; CI gate (todo-63) will run `forge snapshot --check`
+# on every PR. Refresh manually with `forge snapshot` and justify any delta in
+# the commit message.
 
 # Environment
 .env
@@ -35,6 +36,9 @@ verifier-service/.env
 # Coverage
 lcov.info
 coverage/
+
+# forge doc auto-generated NatSpec site (rebuild from source on demand)
+docs/natspec/
 
 # Project-specific — public repo'da tutulmaz
 # research/  : paper, benchmark raw, social-evidence, ADR (lokal-only)
