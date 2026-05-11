@@ -7,22 +7,30 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import { Whitelist } from "./access/Whitelist.sol";
 
 /// @title  GatedVault
 /// @author Sefa Tunçer
 /// @notice ERC-4626 yield vault. Active defenses: simple-interest yield
 ///         with reserve-bounded harvest, virtual-shares decimals offset
 ///         (inflation defense), tracked-AUM `totalAssets` (donation oracle
-///         defense), and constructor-time ERC-777 reject (toxic-asset
-///         filter). Verifiable Credential gating ships in Faz 3 (todos
-///         30+); the public ERC-4626 surface stays untouched so aggregator
+///         defense), constructor-time ERC-777 reject (toxic-asset filter),
+///         and an RBAC `Whitelist` registry that gates the deposit path
+///         (share recipients must be on the allow list). Verifiable
+///         Credential proofs replace the whitelist in Faz 3 (todos 30+);
+///         the public ERC-4626 surface stays untouched so aggregator
 ///         composability is preserved.
 /// @dev    The internal `_deposit` and `_withdraw` hooks already realize
 ///         pending yield (temporal fairness across depositors) and update
-///         tracked `principal`. VC attestation checks and pause logic plug
-///         into the same hook insertion points without disturbing the
-///         standard ERC-4626 ABI. Owner role is reserved for `setYieldRate`
-///         (bounded by `MAX_YIELD_RATE`) and `depositYieldReserve`.
+///         tracked `principal`. `_deposit` additionally calls
+///         `whitelist.checkWhitelisted(receiver)` so the share *holder*
+///         is gated (not the relayer / caller). Withdraw is intentionally
+///         ungated — once funds are in, the depositor must always be able
+///         to exit, even if the admin later removes the address. Share
+///         transfers between EOAs are not gated in v0.2.0; an `_update`
+///         hook check lands together with the VC verifier in Faz 3. Owner
+///         role is reserved for `setYieldRate` (bounded by
+///         `MAX_YIELD_RATE`) and `depositYieldReserve`.
 contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -62,6 +70,20 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///         (`+= realized`).
     uint256 public principal;
 
+    // -------- Whitelist gating --------
+
+    /// @notice RBAC allow-list checked on the deposit path.
+    /// @dev    Wired at construction and `immutable` so deposits avoid an
+    ///         SLOAD; the address book lives in the `Whitelist` contract
+    ///         itself, which is mutable via its own admin role. Swapping
+    ///         the registry would require a vault redeploy, which is the
+    ///         intended posture: the on-chain trust assumption is "this
+    ///         specific Whitelist", not "whatever Whitelist the owner
+    ///         chooses today". Replacement path in Faz 3 is a fresh vault
+    ///         with the VC verifier wired into the same hook insertion
+    ///         point.
+    Whitelist public immutable whitelist;
+
     // -------- Yield: errors / events --------
 
     /// @notice Reverts when a yield rate above MAX_YIELD_RATE is requested.
@@ -76,6 +98,14 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///         probes for `granularity()` (mandatory in ERC-777, absent in
     ///         plain ERC-20) via low-level staticcall.
     error ERC777NotSupported();
+
+    /// @notice Reverts when the constructor receives the zero address for
+    ///         the whitelist registry.
+    /// @dev    Fail-loud at construction. Without this guard every deposit
+    ///         would emit a staticcall to address(0) whose empty return
+    ///         data decodes to a successful no-op, silently bypassing the
+    ///         allow-list check — the opposite of fail-closed.
+    error ZeroWhitelist();
 
     /// @notice Reverts on a zero-asset deposit or withdraw.
     /// @dev    ERC-4626 does not forbid zero amounts, but they are pure
@@ -105,10 +135,12 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     /// @param  asset_            Underlying ERC-20 (must implement IERC20Metadata).
     /// @param  owner_            Initial owner address.
     /// @param  initialYieldRate  Starting yield rate in basis points; must be <= MAX_YIELD_RATE.
+    /// @param  whitelist_        Allow-list registry checked in `_deposit`; must be non-zero.
     constructor(
         IERC20Metadata asset_,
         address owner_,
-        uint256 initialYieldRate
+        uint256 initialYieldRate,
+        Whitelist whitelist_
     )
         ERC4626(IERC20(address(asset_)))
         ERC20(string.concat("Gated ", asset_.symbol(), " Vault"), string.concat("g", asset_.symbol()))
@@ -116,6 +148,9 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     {
         if (initialYieldRate > MAX_YIELD_RATE) {
             revert YieldRateTooHigh(initialYieldRate, MAX_YIELD_RATE);
+        }
+        if (address(whitelist_) == address(0)) {
+            revert ZeroWhitelist();
         }
 
         // Toxic asset filter: ERC-777 mandates `granularity()`; ERC-20 has no
@@ -132,6 +167,7 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
             revert ERC777NotSupported();
         }
 
+        whitelist = whitelist_;
         yieldRate = initialYieldRate;
         lastHarvest = block.timestamp;
     }
@@ -256,17 +292,25 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         return 6;
     }
 
-    /// @dev Internal deposit hook. Rejects zero-amount calls, then realizes
-    ///      pending yield so the new depositor mints shares against an
-    ///      up-to-date `totalAssets()`, and finally increments tracked
-    ///      `principal`. Future overrides will add VC attestation checks
-    ///      and pause logic at this exact insertion point.
+    /// @dev Internal deposit hook. Order:
+    ///      1. reject zero-amount,
+    ///      2. reject non-whitelisted *receiver* (caller can be a relayer),
+    ///      3. realize pending yield so the new depositor mints shares
+    ///         against an up-to-date `totalAssets()`,
+    ///      4. delegate to OZ ERC-4626 (transferFrom + mint),
+    ///      5. update tracked `principal`.
+    ///      The gating check sits before `_harvestYield` so a rejected
+    ///      deposit costs no state writes (no unexpected event emission,
+    ///      no `lastHarvest` stamp). Faz 3 swaps `checkWhitelisted` for a
+    ///      VC attestation check at this exact line; the ERC-4626 ABI
+    ///      stays unchanged.
     /// @param caller   ERC-4626 caller (msg.sender of the public entry point).
-    /// @param receiver Address that receives the minted shares.
+    /// @param receiver Address that receives the minted shares; must be whitelisted.
     /// @param assets   Asset units pulled from caller, added to `principal`.
     /// @param shares   Share units minted to receiver (precomputed by ERC-4626 super).
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
         if (assets == 0) revert ZeroAssets();
+        whitelist.checkWhitelisted(receiver);
         _harvestYield();
         super._deposit(caller, receiver, assets, shares);
         principal += assets;

@@ -5,6 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { MockUSDC } from "../../contracts/mocks/MockUSDC.sol";
 import { GatedVault } from "../../contracts/GatedVault.sol";
+import { Whitelist } from "../../contracts/access/Whitelist.sol";
 
 /// @title  GatedVaultFuzzTest
 /// @author Sefa Tunçer
@@ -17,12 +18,18 @@ contract GatedVaultFuzzTest is Test {
 
     MockUSDC internal usdc;
     GatedVault internal vault;
+    Whitelist internal whitelist;
     address internal owner = makeAddr("owner");
     address internal alice = makeAddr("alice");
 
     function setUp() public {
         usdc = new MockUSDC();
-        vault = new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE);
+        whitelist = new Whitelist(owner);
+        vault = new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE, whitelist);
+        // Fuzz properties exercise the happy path; alice is the sole actor and
+        // is whitelisted at construction so the gating check never reverts.
+        vm.prank(owner);
+        whitelist.setWhitelist(alice, true);
     }
 
     /// @notice Deposit then immediate redeem must return the full principal

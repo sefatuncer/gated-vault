@@ -9,6 +9,7 @@ import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import { MockUSDC } from "../../contracts/mocks/MockUSDC.sol";
 import { MockERC777 } from "../../contracts/mocks/MockERC777.sol";
 import { GatedVault } from "../../contracts/GatedVault.sol";
+import { Whitelist } from "../../contracts/access/Whitelist.sol";
 
 /// @title  GatedVaultTest
 /// @notice Unit tests for the vault: construction metadata, inflation defense,
@@ -19,11 +20,21 @@ contract GatedVaultTest is Test {
 
     MockUSDC internal usdc;
     GatedVault internal vault;
+    Whitelist internal whitelist;
     address internal owner = makeAddr("owner");
 
     function setUp() public {
         usdc = new MockUSDC();
-        vault = new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE);
+        whitelist = new Whitelist(owner);
+        vault = new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE, whitelist);
+    }
+
+    /// @dev Helper: owner grants whitelist membership to `user`. Most existing
+    ///      tests deposit through `makeAddr(...)` addresses that are not on
+    ///      the list by default; gating now requires this step.
+    function _allow(address user) internal {
+        vm.prank(owner);
+        whitelist.setWhitelist(user, true);
     }
 
     function test_DeployedWithCorrectName() public view {
@@ -58,6 +69,9 @@ contract GatedVaultTest is Test {
         uint256 oneUnit = 10 ** usdc.decimals(); // 1 USDC = 1e6 wei
         uint256 donationAmount = 1_000_000 * oneUnit; // 1M USDC
         uint256 victimDeposit = 100 * oneUnit; // 100 USDC
+
+        _allow(attacker);
+        _allow(victim);
 
         usdc.mint(attacker, 1 + donationAmount);
         usdc.mint(victim, victimDeposit);
@@ -114,7 +128,16 @@ contract GatedVaultTest is Test {
     function test_ConstructorRevertsAboveMax() public {
         uint256 tooHigh = 5001;
         vm.expectRevert(abi.encodeWithSelector(GatedVault.YieldRateTooHigh.selector, tooHigh, 5000));
-        new GatedVault(IERC20Metadata(address(usdc)), owner, tooHigh);
+        new GatedVault(IERC20Metadata(address(usdc)), owner, tooHigh, whitelist);
+    }
+
+    function test_ConstructorRevertsForZeroWhitelist() public {
+        vm.expectRevert(GatedVault.ZeroWhitelist.selector);
+        new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE, Whitelist(address(0)));
+    }
+
+    function test_ConstructorStoresWhitelist() public view {
+        assertEq(address(vault.whitelist()), address(whitelist), "whitelist wired");
     }
 
     function test_SetYieldRateRevertsAboveMax() public {
@@ -142,9 +165,11 @@ contract GatedVaultTest is Test {
 
     // -------- Yield mechanics + harvest (todo-12) --------
 
-    /// @dev Helper: Alice deposits `amount` USDC into the vault.
+    /// @dev Helper: Alice deposits `amount` USDC into the vault. Whitelists
+    ///      Alice automatically because the deposit path now gates `receiver`.
     function _aliceDeposits(uint256 amount) internal returns (address alice, uint256 shares) {
         alice = makeAddr("alice");
+        _allow(alice);
         usdc.mint(alice, amount);
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
@@ -291,7 +316,7 @@ contract GatedVaultTest is Test {
     function test_RejectsERC777Asset() public {
         MockERC777 erc777 = new MockERC777();
         vm.expectRevert(GatedVault.ERC777NotSupported.selector);
-        new GatedVault(IERC20Metadata(address(erc777)), owner, INITIAL_YIELD_RATE);
+        new GatedVault(IERC20Metadata(address(erc777)), owner, INITIAL_YIELD_RATE, whitelist);
     }
 
     // -------- Deposit flow (todo-14) --------
@@ -315,6 +340,7 @@ contract GatedVaultTest is Test {
         // Bob deposits the same amount immediately — no yield elapsed.
         // Bob's shares should be approximately equal to Alice's.
         address bob = makeAddr("bob");
+        _allow(bob);
         usdc.mint(bob, amount);
         vm.startPrank(bob);
         usdc.approve(address(vault), type(uint256).max);
@@ -354,6 +380,7 @@ contract GatedVaultTest is Test {
     function test_DepositToReceiver() public {
         address alice = makeAddr("alice");
         address bob = makeAddr("bob");
+        _allow(bob); // gating checks the receiver, not the caller
         uint256 amount = 100 * 10 ** usdc.decimals();
         usdc.mint(alice, amount);
 
@@ -370,6 +397,7 @@ contract GatedVaultTest is Test {
 
     function test_DepositEmitsEvent() public {
         address alice = makeAddr("alice");
+        _allow(alice);
         uint256 amount = 100 * 10 ** usdc.decimals();
         uint256 expectedShares = vault.previewDeposit(amount);
         usdc.mint(alice, amount);
@@ -384,6 +412,7 @@ contract GatedVaultTest is Test {
 
     function test_DepositTransferFromCaller() public {
         address alice = makeAddr("alice");
+        _allow(alice);
         uint256 amount = 100 * 10 ** usdc.decimals();
         usdc.mint(alice, amount);
 
@@ -401,6 +430,7 @@ contract GatedVaultTest is Test {
 
     function test_DepositRevertsInsufficientApproval() public {
         address alice = makeAddr("alice");
+        _allow(alice);
         uint256 amount = 100 * 10 ** usdc.decimals();
         uint256 capped = 50 * 10 ** usdc.decimals();
         usdc.mint(alice, amount);
@@ -537,9 +567,11 @@ contract GatedVaultTest is Test {
 
     // -------- Yield distribution + rate change + edge cases (todo-16) --------
 
-    /// @dev Helper: deposits `amount` for a named address.
+    /// @dev Helper: deposits `amount` for a named address. Whitelists the
+    ///      address first so the gated `_deposit` accepts the receiver.
     function _userDeposits(string memory label, uint256 amount) internal returns (address user, uint256 shares) {
         user = makeAddr(label);
+        _allow(user);
         usdc.mint(user, amount);
         vm.startPrank(user);
         usdc.approve(address(vault), type(uint256).max);
@@ -666,5 +698,84 @@ contract GatedVaultTest is Test {
         assertEq(vault.principal(), deposit + oldRateYield, "old-rate yield realized into principal");
         assertEq(vault.pendingYield(), 0, "no yield carried over at new rate");
         assertEq(vault.yieldRate(), newRate, "rate updated");
+    }
+
+    // -------- Whitelist gating (todo-25) --------
+
+    function test_DepositRevertsForNonWhitelisted() public {
+        address alice = makeAddr("alice"); // deliberately NOT whitelisted
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        usdc.mint(alice, amount);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(Whitelist.NotWhitelisted.selector, alice));
+        vault.deposit(amount, alice);
+        vm.stopPrank();
+    }
+
+    function test_DepositSucceedsForWhitelisted() public {
+        address alice = makeAddr("alice");
+        _allow(alice);
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        usdc.mint(alice, amount);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.deposit(amount, alice);
+        vm.stopPrank();
+
+        assertGt(shares, 0, "whitelisted deposit minted no shares");
+        assertEq(vault.balanceOf(alice), shares, "alice received shares");
+        assertEq(vault.principal(), amount, "principal tracks deposit");
+    }
+
+    /// @notice Gating checks the receiver of shares, not the caller. A
+    ///         whitelisted relayer cannot escort a non-whitelisted recipient
+    ///         past the allow-list.
+    function test_DepositGatesReceiverNotCaller() public {
+        address relayer = makeAddr("relayer");
+        address recipient = makeAddr("recipient");
+        _allow(relayer); // whitelisted caller
+        // recipient deliberately NOT whitelisted
+
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        usdc.mint(relayer, amount);
+        vm.startPrank(relayer);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(Whitelist.NotWhitelisted.selector, recipient));
+        vault.deposit(amount, recipient);
+        vm.stopPrank();
+    }
+
+    /// @notice Withdraw is intentionally ungated. A user who deposited while
+    ///         on the allow list must always be able to exit, even after the
+    ///         admin removes them — sanction-resistance / UX trade-off
+    ///         documented in the contract NatSpec.
+    function test_WithdrawAllowedAfterRemoval() public {
+        uint256 amount = 100 * 10 ** usdc.decimals();
+        (address alice, uint256 shares) = _aliceDeposits(amount);
+
+        // Admin revokes alice mid-flight.
+        vm.prank(owner);
+        whitelist.setWhitelist(alice, false);
+        assertFalse(whitelist.isWhitelisted(alice), "alice removed from list");
+
+        vm.prank(alice);
+        uint256 assetsBack = vault.redeem(shares, alice, alice);
+
+        assertApproxEqAbs(assetsBack, amount, 1, "removed user can still redeem");
+        assertEq(vault.balanceOf(alice), 0, "alice shares burned");
+    }
+
+    /// @notice The `mint(shares, receiver)` entry point shares the same
+    ///         `_deposit` hook, so gating applies there too.
+    function test_MintRevertsForNonWhitelisted() public {
+        address alice = makeAddr("alice"); // not whitelisted
+        uint256 shares = 1e12;
+        usdc.mint(alice, 1_000_000 * 10 ** usdc.decimals());
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(Whitelist.NotWhitelisted.selector, alice));
+        vault.mint(shares, alice);
+        vm.stopPrank();
     }
 }
