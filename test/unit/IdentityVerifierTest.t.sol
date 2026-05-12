@@ -103,4 +103,137 @@ contract IdentityVerifierTest is Test {
 
         assertFalse(verifier.hasRole(SIGNER_ROLE, signer), "revoke did not stick");
     }
+
+    // -------- EIP-712 hashing helpers --------
+
+    function _sampleAttestation()
+        internal
+        pure
+        returns (address user, bytes32 credentialHash, uint64 expiry, bytes32 nonce)
+    {
+        user = address(0xA11CE);
+        credentialHash = keccak256("credential-identifier:user-A11CE");
+        expiry = uint64(1_800_000_000); // arbitrary future-ish UNIX ts; helper does not validate
+        nonce = keccak256("nonce-0001");
+    }
+
+    function test_HashAttestationStable() public view {
+        (address user, bytes32 credentialHash, uint64 expiry, bytes32 nonce) = _sampleAttestation();
+
+        bytes32 a = verifier.hashAttestation(user, credentialHash, expiry, nonce);
+        bytes32 b = verifier.hashAttestation(user, credentialHash, expiry, nonce);
+
+        assertEq(a, b, "deterministic helper produced different digests for the same inputs");
+        assertTrue(a != bytes32(0), "digest must not be zero");
+    }
+
+    function test_HashAttestationChangesPerField() public view {
+        (address user, bytes32 credentialHash, uint64 expiry, bytes32 nonce) = _sampleAttestation();
+        bytes32 base = verifier.hashAttestation(user, credentialHash, expiry, nonce);
+
+        // Flip each of the four message fields one at a time. Any
+        // skipped field in `abi.encode` would surface here as a
+        // collision with `base`.
+        assertTrue(
+            verifier.hashAttestation(address(0xBEEF), credentialHash, expiry, nonce) != base, "user field not hashed"
+        );
+        assertTrue(
+            verifier.hashAttestation(user, keccak256("other-credential"), expiry, nonce) != base,
+            "credentialHash field not hashed"
+        );
+        assertTrue(verifier.hashAttestation(user, credentialHash, expiry + 1, nonce) != base, "expiry field not hashed");
+        assertTrue(
+            verifier.hashAttestation(user, credentialHash, expiry, keccak256("other-nonce")) != base,
+            "nonce field not hashed"
+        );
+    }
+
+    function test_HashAttestationMatchesManualReconstruction() public view {
+        (address user, bytes32 credentialHash, uint64 expiry, bytes32 nonce) = _sampleAttestation();
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256("Attestation(address user,bytes32 credentialHash,uint64 expiry,bytes32 nonce)"),
+                user,
+                credentialHash,
+                expiry,
+                nonce
+            )
+        );
+
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("GatedVault.IdentityVerifier")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(verifier)
+            )
+        );
+
+        bytes32 expected = keccak256(abi.encodePacked(hex"1901", domainSeparator, structHash));
+
+        assertEq(
+            verifier.hashAttestation(user, credentialHash, expiry, nonce),
+            expected,
+            "helper digest drifted from EIP-712 spec reconstruction"
+        );
+    }
+
+    function test_DomainSeparatorMatchesEIP712Spec() public view {
+        // OZ EIP712's internal separator is not directly readable. We
+        // assert it matches the EIP-712 spec by checking that the
+        // spec-formula separator, when wrapped around our struct
+        // hash, reproduces the helper's output. If an OZ upgrade
+        // changes the internal layout, this drift surfaces here.
+        bytes32 specSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("GatedVault.IdentityVerifier")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(verifier)
+            )
+        );
+
+        (address user, bytes32 credentialHash, uint64 expiry, bytes32 nonce) = _sampleAttestation();
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256("Attestation(address user,bytes32 credentialHash,uint64 expiry,bytes32 nonce)"),
+                user,
+                credentialHash,
+                expiry,
+                nonce
+            )
+        );
+
+        bytes32 specDigest = keccak256(abi.encodePacked(hex"1901", specSeparator, structHash));
+
+        assertEq(
+            verifier.hashAttestation(user, credentialHash, expiry, nonce),
+            specDigest,
+            "OZ domain separator drifted from EIP-712 spec"
+        );
+    }
+
+    function test_HashAttestationDistinctFromBareStructHash() public view {
+        // ADR-003 rejected "ECDSA over raw keccak256(abi.encode(...))" because the bare
+        // struct hash collides with possible transaction hashes. Lock the distinction in
+        // a test fixture: the helper output must NOT equal the bare struct hash.
+        (address user, bytes32 credentialHash, uint64 expiry, bytes32 nonce) = _sampleAttestation();
+
+        bytes32 bareStructHash = keccak256(
+            abi.encode(
+                keccak256("Attestation(address user,bytes32 credentialHash,uint64 expiry,bytes32 nonce)"),
+                user,
+                credentialHash,
+                expiry,
+                nonce
+            )
+        );
+
+        bytes32 wrapped = verifier.hashAttestation(user, credentialHash, expiry, nonce);
+
+        assertTrue(wrapped != bareStructHash, "wrapped digest must differ from bare struct hash");
+    }
 }

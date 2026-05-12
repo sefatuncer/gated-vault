@@ -114,4 +114,36 @@ contract IdentityVerifier is EIP712, AccessControl {
     constructor(address admin) EIP712("GatedVault.IdentityVerifier", "1") {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
+
+    // -------- EIP-712 hashing helpers --------
+
+    /// @notice Compute the EIP-712 digest for an Attestation message.
+    /// @dev    Public view so off-chain TypeScript clients
+    ///         (verifier-service) can read the canonical digest via
+    ///         `eth_call` instead of re-implementing the struct
+    ///         layout. The digest is
+    ///         `keccak256("\x19\x01" || domainSeparator || structHash)`
+    ///         where
+    ///         `structHash = keccak256(abi.encode(ATTESTATION_TYPEHASH, ...))`.
+    ///         The domain separator is fork-aware (OZ `EIP712` caches
+    ///         per chainId + address and rebuilds when either
+    ///         changes).
+    /// @param  user            Share recipient gated by `GatedVault._deposit`.
+    /// @param  credentialHash  `keccak256` of the off-chain credential identifier.
+    /// @param  expiry          UNIX timestamp after which the attestation is stale.
+    /// @param  nonce           Single-use; recorded in `usedNonces` on consume.
+    /// @return digest          Typed-data digest to be ECDSA-signed off-chain.
+    function hashAttestation(
+        address user,
+        bytes32 credentialHash,
+        uint64 expiry,
+        bytes32 nonce
+    )
+        external
+        view
+        returns (bytes32 digest)
+    {
+        bytes32 structHash = keccak256(abi.encode(ATTESTATION_TYPEHASH, user, credentialHash, expiry, nonce));
+        digest = _hashTypedDataV4(structHash);
+    }
 }
