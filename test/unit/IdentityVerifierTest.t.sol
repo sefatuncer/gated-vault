@@ -18,8 +18,35 @@ contract IdentityVerifierTest is Test {
     bytes32 internal constant DEFAULT_ADMIN_ROLE = 0x00;
     bytes32 internal constant SIGNER_ROLE = keccak256("SIGNER_ROLE");
 
+    // Deterministic signer keypair for consumeAttestation tests
+    // (todo-32). Re-derived in setUp so the same admin grant applies
+    // across the whole test contract.
+    uint256 internal constant SIGNER_KEY = uint256(keccak256("identity-verifier-signer-key"));
+    address internal signer;
+
     function setUp() public {
         verifier = new IdentityVerifier(admin);
+
+        signer = vm.addr(SIGNER_KEY);
+        vm.prank(admin);
+        verifier.grantRole(SIGNER_ROLE, signer);
+    }
+
+    // -------- consumeAttestation helpers (todo-32) --------
+
+    function _defaultAttestation() internal returns (IdentityVerifier.Attestation memory a) {
+        a = IdentityVerifier.Attestation({
+            user: makeAddr("alice"),
+            credentialHash: keccak256("credential-identifier:alice"),
+            expiry: uint64(block.timestamp + 1 hours),
+            nonce: keccak256("nonce-alice-001")
+        });
+    }
+
+    function _signWithKey(IdentityVerifier.Attestation memory a, uint256 key) internal view returns (bytes memory) {
+        bytes32 digest = verifier.hashAttestation(a.user, a.credentialHash, a.expiry, a.nonce);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, digest);
+        return abi.encodePacked(r, s, v);
     }
 
     // -------- Constructor / roles --------
@@ -85,23 +112,23 @@ contract IdentityVerifierTest is Test {
     // -------- Role grant flow (skeleton smoke) --------
 
     function test_AdminCanGrantSignerRole() public {
-        address signer = makeAddr("signer");
+        address localSigner = makeAddr("local-signer-grant");
 
         vm.prank(admin);
-        verifier.grantRole(SIGNER_ROLE, signer);
+        verifier.grantRole(SIGNER_ROLE, localSigner);
 
-        assertTrue(verifier.hasRole(SIGNER_ROLE, signer), "grant did not stick");
+        assertTrue(verifier.hasRole(SIGNER_ROLE, localSigner), "grant did not stick");
     }
 
     function test_AdminCanRevokeSignerRole() public {
-        address signer = makeAddr("signer");
+        address localSigner = makeAddr("local-signer-revoke");
 
         vm.startPrank(admin);
-        verifier.grantRole(SIGNER_ROLE, signer);
-        verifier.revokeRole(SIGNER_ROLE, signer);
+        verifier.grantRole(SIGNER_ROLE, localSigner);
+        verifier.revokeRole(SIGNER_ROLE, localSigner);
         vm.stopPrank();
 
-        assertFalse(verifier.hasRole(SIGNER_ROLE, signer), "revoke did not stick");
+        assertFalse(verifier.hasRole(SIGNER_ROLE, localSigner), "revoke did not stick");
     }
 
     // -------- EIP-712 hashing helpers --------
@@ -235,5 +262,60 @@ contract IdentityVerifierTest is Test {
         bytes32 wrapped = verifier.hashAttestation(user, credentialHash, expiry, nonce);
 
         assertTrue(wrapped != bareStructHash, "wrapped digest must differ from bare struct hash");
+    }
+
+    // -------- consumeAttestation smoke (todo-32) --------
+
+    function test_ConsumeAttestationHappyPath() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        bytes memory sig = _signWithKey(a, SIGNER_KEY);
+
+        vm.expectEmit(true, true, false, true, address(verifier));
+        emit IdentityVerifier.AttestationConsumed(a.user, a.nonce, a.expiry);
+
+        verifier.consumeAttestation(a, sig);
+
+        assertTrue(verifier.usedNonces(a.nonce), "nonce not marked used");
+        assertEq(verifier.attestedUntil(a.user), a.expiry, "attestedUntil not written");
+    }
+
+    function test_ConsumeRevertsOnExpired() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        // Move now past expiry so the check `expiry < block.timestamp` fires.
+        vm.warp(uint256(a.expiry) + 1);
+        bytes memory sig = _signWithKey(a, SIGNER_KEY);
+
+        vm.expectRevert(abi.encodeWithSelector(IdentityVerifier.AttestationExpired.selector, a.expiry));
+        verifier.consumeAttestation(a, sig);
+    }
+
+    function test_ConsumeRevertsOnReplay() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        bytes memory sig = _signWithKey(a, SIGNER_KEY);
+
+        verifier.consumeAttestation(a, sig);
+
+        vm.expectRevert(abi.encodeWithSelector(IdentityVerifier.AttestationReplayed.selector, a.nonce));
+        verifier.consumeAttestation(a, sig);
+    }
+
+    function test_ConsumeRevertsOnUntrustedSigner() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        uint256 strangerKey = uint256(keccak256("not-a-signer"));
+        address strangerSigner = vm.addr(strangerKey);
+        bytes memory sig = _signWithKey(a, strangerKey);
+
+        vm.expectRevert(abi.encodeWithSelector(IdentityVerifier.UntrustedSigner.selector, strangerSigner));
+        verifier.consumeAttestation(a, sig);
+    }
+
+    function test_ConsumeRevertsOnMalformedSignature() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        // Length 7 -> ECDSA.tryRecover surfaces InvalidSignatureLength,
+        // which we translate to SignatureInvalid().
+        bytes memory sig = bytes("garbage");
+
+        vm.expectRevert(IdentityVerifier.SignatureInvalid.selector);
+        verifier.consumeAttestation(a, sig);
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import { EIP712 } from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
 
 /// @title  IdentityVerifier
@@ -24,6 +25,23 @@ import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol"
 ///         `trustedVerifiers` mapping or a custom `VerifierTrusted`
 ///         event.
 contract IdentityVerifier is EIP712, AccessControl {
+    // -------- Types --------
+
+    /// @notice Off-chain attestation produced by the verifier-service operator.
+    /// @dev    Field order mirrors `ATTESTATION_TYPEHASH`. Re-ordering
+    ///         fields without re-pinning the type hash would break the
+    ///         off-chain signer; the CI gate (todo-34) catches drift.
+    /// @param  user            Share recipient that the attestation gates.
+    /// @param  credentialHash  `keccak256` of the off-chain credential identifier.
+    /// @param  expiry          UNIX timestamp; rejected when `expiry < block.timestamp`.
+    /// @param  nonce           Single-use; tracked in `usedNonces`.
+    struct Attestation {
+        address user;
+        bytes32 credentialHash;
+        uint64 expiry;
+        bytes32 nonce;
+    }
+
     // -------- Roles --------
 
     /// @notice Role authorized to sign attestations consumed by this contract.
@@ -145,5 +163,45 @@ contract IdentityVerifier is EIP712, AccessControl {
     {
         bytes32 structHash = keccak256(abi.encode(ATTESTATION_TYPEHASH, user, credentialHash, expiry, nonce));
         digest = _hashTypedDataV4(structHash);
+    }
+
+    // -------- Attestation consumption --------
+
+    /// @notice Verify and consume an EIP-712 Attestation signed by a
+    ///         trusted SIGNER_ROLE holder.
+    /// @dev    Check order is fail-fast (cheapest first, most
+    ///         expensive last): `expiry` (no SLOAD) → `usedNonces`
+    ///         (1 SLOAD) → `keccak + _hashTypedDataV4` (~600 gas) →
+    ///         `ECDSA.tryRecover` (~3k, ecrecover precompile + length
+    ///         parse) → `hasRole` (1 SLOAD). A stale or replayed
+    ///         attestation never reaches the signature recovery path.
+    ///         `tryRecover` rejects high-`s` malleability and accepts
+    ///         both 65-byte standard and 64-byte EIP-2098 compact
+    ///         signatures; a malformed signature surfaces as
+    ///         `SignatureInvalid` rather than `UntrustedSigner` so the
+    ///         failure class is unambiguous downstream. State writes
+    ///         (`usedNonces`, `attestedUntil`) happen before the
+    ///         event emit; the function has no external calls, so
+    ///         ReentrancyGuard is not required.
+    /// @param  a   Calldata Attestation; field order must match
+    ///             `ATTESTATION_TYPEHASH`.
+    /// @param  sig 65-byte (r||s||v) or 64-byte EIP-2098 compact
+    ///             signature over the typed-data digest.
+    function consumeAttestation(Attestation calldata a, bytes calldata sig) external {
+        if (a.expiry < block.timestamp) revert AttestationExpired(a.expiry);
+        if (usedNonces[a.nonce]) revert AttestationReplayed(a.nonce);
+
+        bytes32 structHash = keccak256(abi.encode(ATTESTATION_TYPEHASH, a.user, a.credentialHash, a.expiry, a.nonce));
+        bytes32 digest = _hashTypedDataV4(structHash);
+
+        // slither-disable-next-line unused-return
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, sig);
+        if (err != ECDSA.RecoverError.NoError) revert SignatureInvalid();
+        if (!hasRole(SIGNER_ROLE, signer)) revert UntrustedSigner(signer);
+
+        usedNonces[a.nonce] = true;
+        attestedUntil[a.user] = a.expiry;
+
+        emit AttestationConsumed(a.user, a.nonce, a.expiry);
     }
 }
