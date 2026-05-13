@@ -175,11 +175,19 @@ contract IdentityVerifier is EIP712, AccessControl {
     ///         `ECDSA.tryRecover` (~3k, ecrecover precompile + length
     ///         parse) → `hasRole` (1 SLOAD). A stale or replayed
     ///         attestation never reaches the signature recovery path.
-    ///         `tryRecover` rejects high-`s` malleability and accepts
-    ///         both 65-byte standard and 64-byte EIP-2098 compact
-    ///         signatures; a malformed signature surfaces as
-    ///         `SignatureInvalid` rather than `UntrustedSigner` so the
-    ///         failure class is unambiguous downstream. State writes
+    ///         `tryRecover` rejects high-`s` malleability. The OZ
+    ///         v5.6.0 `bytes` overload accepts only the 65-byte
+    ///         (r||s||v) standard form; EIP-2098 compact 64-byte
+    ///         signatures are rejected with `InvalidSignatureLength`,
+    ///         which surfaces here as `SignatureInvalid`. The
+    ///         verifier-service signs the 65-byte form
+    ///         (ethers v6 `signTypedData` default), so this is not a
+    ///         practical limitation; lifting it would require a
+    ///         parallel branch over `ECDSA.tryRecover(hash, r, vs)`
+    ///         that the present scope does not require. A malformed
+    ///         signature surfaces as `SignatureInvalid` rather than
+    ///         `UntrustedSigner` so the failure class is unambiguous
+    ///         downstream. State writes
     ///         (`usedNonces`, `attestedUntil`) happen before the
     ///         event emit; the function has no external calls, so
     ///         ReentrancyGuard is not required.
