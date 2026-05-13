@@ -320,6 +320,80 @@ contract IdentityVerifierTest is Test {
         verifier.consumeAttestation(a, sig);
     }
 
+    // -------- Nonce replay edge cases (todo-34) --------
+
+    /// @dev State-transition focus: complements `test_ConsumeAttestationHappyPath`
+    ///      by pinning the false -> true flip on `usedNonces[nonce]` around
+    ///      a single consume call. A regression that skips the mark write
+    ///      surfaces here even if the event + `attestedUntil` assertions
+    ///      still pass elsewhere.
+    function test_FirstUseFlipsNonceState() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        bytes memory sig = _signWithKey(a, SIGNER_KEY);
+
+        assertFalse(verifier.usedNonces(a.nonce), "nonce dirty before first consume");
+        verifier.consumeAttestation(a, sig);
+        assertTrue(verifier.usedNonces(a.nonce), "first consume did not mark nonce");
+    }
+
+    /// @dev Mapping key isolation: a spent nonce must not poison sibling
+    ///      keys. Two attestations for the same user with distinct nonces
+    ///      both consume successfully, both flags land, and `attestedUntil`
+    ///      reflects the latest expiry.
+    function test_DifferentNonceTwiceSucceeds() public {
+        IdentityVerifier.Attestation memory a1 = _defaultAttestation();
+        bytes memory sig1 = _signWithKey(a1, SIGNER_KEY);
+        verifier.consumeAttestation(a1, sig1);
+
+        IdentityVerifier.Attestation memory a2 = _defaultAttestation();
+        a2.nonce = keccak256("nonce-alice-002");
+        a2.expiry = a1.expiry + 1;
+        bytes memory sig2 = _signWithKey(a2, SIGNER_KEY);
+        verifier.consumeAttestation(a2, sig2);
+
+        assertTrue(verifier.usedNonces(a1.nonce), "first nonce unmarked");
+        assertTrue(verifier.usedNonces(a2.nonce), "second nonce unmarked");
+        assertEq(verifier.attestedUntil(a1.user), a2.expiry, "attestedUntil did not adopt latest expiry");
+    }
+
+    /// @dev Spec lock-in: a failed consume must NOT burn the nonce. An
+    ///      attacker (or buggy client) cannot DoS a victim by spraying
+    ///      malformed / untrusted attestations carrying the victim's
+    ///      nonce. After two reverts on the same nonce, a valid
+    ///      attestation with that nonce still goes through.
+    function test_FailedAttestationDoesNotMarkNonce() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+
+        // (1) Untrusted signer revert.
+        uint256 strangerKey = uint256(keccak256("not-a-signer"));
+        address strangerSigner = vm.addr(strangerKey);
+        bytes memory sigUntrusted = _signWithKey(a, strangerKey);
+        vm.expectRevert(abi.encodeWithSelector(IdentityVerifier.UntrustedSigner.selector, strangerSigner));
+        verifier.consumeAttestation(a, sigUntrusted);
+        assertFalse(verifier.usedNonces(a.nonce), "untrusted revert marked nonce");
+
+        // (2) Malformed signature revert.
+        bytes memory sigBad = bytes("garbage");
+        vm.expectRevert(IdentityVerifier.SignatureInvalid.selector);
+        verifier.consumeAttestation(a, sigBad);
+        assertFalse(verifier.usedNonces(a.nonce), "malformed-sig revert marked nonce");
+
+        // (3) Expired revert. Snapshot/restore so the warp does not
+        //     leak into the valid retry below.
+        uint256 snap = vm.snapshotState();
+        bytes memory sigExpired = _signWithKey(a, SIGNER_KEY);
+        vm.warp(uint256(a.expiry) + 1);
+        vm.expectRevert(abi.encodeWithSelector(IdentityVerifier.AttestationExpired.selector, a.expiry));
+        verifier.consumeAttestation(a, sigExpired);
+        assertFalse(verifier.usedNonces(a.nonce), "expired revert marked nonce");
+        vm.revertToState(snap);
+
+        // (4) Valid retry with the same nonce succeeds.
+        bytes memory sigValid = _signWithKey(a, SIGNER_KEY);
+        verifier.consumeAttestation(a, sigValid);
+        assertTrue(verifier.usedNonces(a.nonce), "valid retry did not mark nonce");
+    }
+
     // -------- Role management security (todo-33) --------
 
     function test_NonAdminCannotGrantSignerRole() public {
