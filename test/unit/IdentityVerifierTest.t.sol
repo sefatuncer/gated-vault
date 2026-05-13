@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import { Test } from "forge-std/Test.sol";
+import { IAccessControl } from "@openzeppelin/contracts/access/IAccessControl.sol";
 import { IdentityVerifier } from "../../contracts/identity/IdentityVerifier.sol";
 
 /// @title  IdentityVerifierTest
@@ -317,5 +318,88 @@ contract IdentityVerifierTest is Test {
 
         vm.expectRevert(IdentityVerifier.SignatureInvalid.selector);
         verifier.consumeAttestation(a, sig);
+    }
+
+    // -------- Role management security (todo-33) --------
+
+    function test_NonAdminCannotGrantSignerRole() public {
+        address newSigner = makeAddr("new-signer");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, DEFAULT_ADMIN_ROLE
+            )
+        );
+        vm.prank(stranger);
+        verifier.grantRole(SIGNER_ROLE, newSigner);
+    }
+
+    function test_NonAdminCannotRevokeSignerRole() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, DEFAULT_ADMIN_ROLE
+            )
+        );
+        vm.prank(stranger);
+        verifier.revokeRole(SIGNER_ROLE, signer);
+
+        // Negative consequence: the existing signer keeps the role.
+        assertTrue(verifier.hasRole(SIGNER_ROLE, signer), "unauthorized revoke leaked through");
+    }
+
+    /// @dev Renounce-bricks-management pitfall at the DEFAULT_ADMIN level.
+    ///      A sole admin renouncing DEFAULT_ADMIN_ROLE strands every future
+    ///      role grant or revoke. This is the broader-blast-radius cousin
+    ///      of `WhitelistTest.test_RenounceRoleBricksRegistryWhenSoleAdmin`
+    ///      — production deployments are expected to seat
+    ///      DEFAULT_ADMIN_ROLE in a multisig.
+    function test_RenounceDefaultAdminBricksRoleManagement() public {
+        vm.prank(admin);
+        verifier.renounceRole(DEFAULT_ADMIN_ROLE, admin);
+        assertFalse(verifier.hasRole(DEFAULT_ADMIN_ROLE, admin), "renounce did not clear admin role");
+
+        address newSigner = makeAddr("post-renounce-signer");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, DEFAULT_ADMIN_ROLE)
+        );
+        vm.prank(admin);
+        verifier.grantRole(SIGNER_ROLE, newSigner);
+    }
+
+    /// @dev Operational runbook: signer rotation after an
+    ///      off-chain verifier-service key compromise. Phase 7
+    ///      docs reference this test as the live spec. Steps
+    ///      mirror what the multisig will execute on-chain in a
+    ///      single Safe batch tx during a real incident.
+    function test_SignerRotationFlow() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        bytes memory sigV1 = _signWithKey(a, SIGNER_KEY);
+
+        uint256 signerKeyV2 = uint256(keccak256("identity-verifier-signer-key-v2"));
+        address signerV2 = vm.addr(signerKeyV2);
+
+        // Multisig flow: revoke compromised key, grant fresh key.
+        vm.startPrank(admin);
+        verifier.revokeRole(SIGNER_ROLE, signer);
+        verifier.grantRole(SIGNER_ROLE, signerV2);
+        vm.stopPrank();
+
+        assertFalse(verifier.hasRole(SIGNER_ROLE, signer), "old signer still trusted");
+        assertTrue(verifier.hasRole(SIGNER_ROLE, signerV2), "new signer not trusted");
+
+        // Old key's signature now reverts as UntrustedSigner — the
+        // compromised key cannot mint fresh attestations even though
+        // any attestation it signed before the revoke remains
+        // technically valid until expiry (compromise window).
+        vm.expectRevert(abi.encodeWithSelector(IdentityVerifier.UntrustedSigner.selector, signer));
+        verifier.consumeAttestation(a, sigV1);
+
+        // Fresh signature from the rotated key succeeds.
+        bytes memory sigV2 = _signWithKey(a, signerKeyV2);
+        verifier.consumeAttestation(a, sigV2);
+
+        assertTrue(verifier.usedNonces(a.nonce), "rotated-key consume did not mark nonce");
+        assertEq(verifier.attestedUntil(a.user), a.expiry, "rotated-key consume did not write attestedUntil");
     }
 }
