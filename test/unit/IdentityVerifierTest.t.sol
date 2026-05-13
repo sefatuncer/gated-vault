@@ -50,6 +50,17 @@ contract IdentityVerifierTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    /// @dev EIP-2098 compact signature: 64 bytes (r || vs) where
+    ///      vs = s | ((v - 27) << 255). `vm.sign` produces canonical
+    ///      low-s signatures, so the top bit of `s` is always zero
+    ///      and is safe to overwrite with the recovery bit.
+    function _signCompact(IdentityVerifier.Attestation memory a, uint256 key) internal view returns (bytes memory) {
+        bytes32 digest = verifier.hashAttestation(a.user, a.credentialHash, a.expiry, a.nonce);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, digest);
+        bytes32 vs = bytes32(uint256(s) | (uint256(v - 27) << 255));
+        return abi.encodePacked(r, vs);
+    }
+
     // -------- Constructor / roles --------
 
     function test_AdminHasDefaultAdminRole() public view {
@@ -392,6 +403,69 @@ contract IdentityVerifierTest is Test {
         bytes memory sigValid = _signWithKey(a, SIGNER_KEY);
         verifier.consumeAttestation(a, sigValid);
         assertTrue(verifier.usedNonces(a.nonce), "valid retry did not mark nonce");
+    }
+
+    // -------- Happy-path matrix (todo-35) --------
+
+    /// @dev OZ v5.6.0 limitation pin: the `bytes` overload of
+    ///      `ECDSA.tryRecover` accepts only 65-byte signatures and
+    ///      surfaces `InvalidSignatureLength` for 64-byte EIP-2098
+    ///      compact form — which `consumeAttestation` translates to
+    ///      `SignatureInvalid`. The verifier-service signs the
+    ///      65-byte form (ethers v6 `signTypedData` default), so this
+    ///      is the contracted boundary. Should a future ADR add
+    ///      compact support via the `(bytes32 r, bytes32 vs)`
+    ///      overload, this test flips from a reject pin to a happy
+    ///      path.
+    function test_CompactSignatureRejectedUnderOZv5BytesOverload() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        bytes memory sig = _signCompact(a, SIGNER_KEY);
+        assertEq(sig.length, 64, "compact sig must be 64 bytes");
+
+        vm.expectRevert(IdentityVerifier.SignatureInvalid.selector);
+        verifier.consumeAttestation(a, sig);
+
+        assertFalse(verifier.usedNonces(a.nonce), "rejected compact-sig must not mark nonce");
+    }
+
+    /// @dev ADR-003 strict-less expiry decision: `a.expiry < block.timestamp`
+    ///      reverts, equality passes. `test_ConsumeRevertsOnExpired`
+    ///      pins `expiry + 1` as the reject boundary; this fixture
+    ///      pins `expiry == block.timestamp` as the accept boundary.
+    ///      A future relaxed `<=` regression would surface here.
+    function test_ConsumeAttestationAtExpiryBoundary() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        bytes memory sig = _signWithKey(a, SIGNER_KEY);
+        vm.warp(uint256(a.expiry));
+
+        verifier.consumeAttestation(a, sig);
+
+        assertTrue(verifier.usedNonces(a.nonce), "boundary-expiry consume did not mark nonce");
+        assertEq(verifier.attestedUntil(a.user), a.expiry, "boundary-expiry consume did not write attestedUntil");
+    }
+
+    /// @dev Multi-user isolation: distinct users consuming distinct
+    ///      attestations each land in their own `attestedUntil` slot,
+    ///      with no cross-pollution. Complements
+    ///      `test_DifferentNonceTwiceSucceeds` (same user, two
+    ///      nonces) on the orthogonal axis.
+    function test_ConsumeAttestationMultipleUsers() public {
+        address[3] memory users = [makeAddr("user-1"), makeAddr("user-2"), makeAddr("user-3")];
+        bytes32[3] memory nonces = [keccak256("nonce-multi-1"), keccak256("nonce-multi-2"), keccak256("nonce-multi-3")];
+        uint64 expiry = uint64(block.timestamp + 1 hours);
+
+        for (uint256 i = 0; i < 3; ++i) {
+            IdentityVerifier.Attestation memory a = IdentityVerifier.Attestation({
+                user: users[i], credentialHash: keccak256(abi.encode("cred", i)), expiry: expiry, nonce: nonces[i]
+            });
+            bytes memory sig = _signWithKey(a, SIGNER_KEY);
+            verifier.consumeAttestation(a, sig);
+        }
+
+        for (uint256 i = 0; i < 3; ++i) {
+            assertTrue(verifier.usedNonces(nonces[i]), "nonce not marked for user");
+            assertEq(verifier.attestedUntil(users[i]), expiry, "attestedUntil not isolated per user");
+        }
     }
 
     // -------- Role management security (todo-33) --------
