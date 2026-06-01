@@ -101,17 +101,32 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///         (Variant A: the credential is the stronger auth). The zero
     ///         address is a valid configuration meaning "VC path disabled,
     ///         whitelist-only" — it keeps the v0.2.0 deploy shape and the
-    ///         existing test surface working unchanged. Note the gate reads
+    ///         existing test surface working unchanged. The gate reads
     ///         `attestedUntil`, a session record set by
     ///         `IdentityVerifier.consumeAttestation`: an attestation is a
-    ///         time-boxed deposit window, not a per-deposit proof. Which
-    ///         credential *type* counts is enforced off-chain at the
-    ///         signer (the verifier-service only signs valid credentials);
-    ///         the vault deliberately does not re-check a credential type
-    ///         on-chain because `attestedUntil` carries none and a caller
-    ///         can set it via a direct `consumeAttestation`, so an on-chain
-    ///         type compare would be bypassable theater.
+    ///         time-boxed deposit window, not a per-deposit proof. When
+    ///         `requiredCredentialType` is non-zero the gate additionally
+    ///         reads `attestedCredentialType(receiver)` and requires it to
+    ///         match. That second read is what makes the type check
+    ///         non-bypassable: the type is recorded on the verifier (which
+    ///         every consume routes through), so a caller who consumes an
+    ///         attestation directly — skipping the vault — still leaves the
+    ///         consumed type on record and is rejected if it does not match.
     IdentityVerifier public immutable identityVerifier;
+
+    /// @notice Credential type the deposit gate requires (zero = accept any).
+    /// @dev    Mutable owner *policy*, not an immutable trust anchor: which
+    ///         KYC / credential standard the vault accepts is expected to
+    ///         change over time (e.g. migrating from one schema to a newer
+    ///         one), so unlike `identityVerifier` (the trust anchor) this is
+    ///         owner-settable via `setRequiredCredentialType`. The zero
+    ///         value disables the type filter, so a freshly deployed vault
+    ///         accepts any trusted-signed attestation until the owner pins a
+    ///         type. Matched against `IdentityVerifier.attestedCredentialType`
+    ///         in `_enforceGate` and against the supplied `credentialHash`
+    ///         in `depositWithAttestation`. Documented in the README's Trust
+    ///         Assumptions section alongside `setYieldRate`.
+    bytes32 public requiredCredentialType;
 
     // -------- Yield: errors / events --------
 
@@ -136,6 +151,17 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///         allow-list check — the opposite of fail-closed.
     error ZeroWhitelist();
 
+    /// @notice Reverts when `depositWithAttestation` is given an attestation
+    ///         whose credential type does not match `requiredCredentialType`.
+    /// @dev    Raised before the attestation is consumed, so a wrong-type
+    ///         attempt does not burn the nonce. The gate-level check in
+    ///         `_enforceGate` is the security-critical one (it also closes
+    ///         the direct-consume path); this early revert is the clear-UX
+    ///         counterpart on the vault's own entry point.
+    /// @param provided The credential type carried by the supplied attestation.
+    /// @param required The credential type the vault currently requires.
+    error CredentialTypeMismatch(bytes32 provided, bytes32 required);
+
     /// @notice Reverts on a zero-asset deposit or withdraw.
     /// @dev    ERC-4626 does not forbid zero amounts, but they are pure
     ///         gas waste and event spam: a successful zero-deposit emits
@@ -152,6 +178,11 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     /// @notice Emitted when accrued yield is realized as principal.
     /// @param amount Yield realized in this harvest, in asset units.
     event YieldHarvested(uint256 amount);
+
+    /// @notice Emitted when the owner changes the required credential type.
+    /// @param oldType Previous required type (zero = no filter).
+    /// @param newType New required type (zero = disable the filter).
+    event RequiredCredentialTypeUpdated(bytes32 oldType, bytes32 newType);
 
     /// @notice Construct the vault around an underlying ERC-20 asset.
     /// @dev    Vault token name and symbol are derived from the asset's
@@ -307,10 +338,15 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///         (`AttestationExpired`, `AttestationReplayed`,
     ///         `UntrustedSigner`, `SignatureInvalid`) unchanged. Requires a
     ///         non-zero `identityVerifier`; in whitelist-only mode the call
-    ///         reverts when it dispatches to the zero address.
+    ///         reverts when it dispatches to the zero address. When
+    ///         `requiredCredentialType` is set, a `credentialHash` that does
+    ///         not match it reverts early with `CredentialTypeMismatch`
+    ///         before the attestation is consumed, so a wrong-type attempt
+    ///         does not burn the nonce.
     /// @param  assets         Asset units to pull from the caller.
     /// @param  receiver       Share recipient; also the attestation subject (`user`).
-    /// @param  credentialHash `keccak256` of the off-chain credential identifier.
+    /// @param  credentialHash Credential type / schema identifier; must equal
+    ///                        `requiredCredentialType` when that is non-zero.
     /// @param  expiry         Attestation expiry (UNIX); must be >= now at consume time.
     /// @param  nonce          Single-use attestation nonce.
     /// @param  signature      65-byte (r||s||v) signature over the typed-data digest.
@@ -327,6 +363,9 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         nonReentrant
         returns (uint256 shares)
     {
+        if (requiredCredentialType != bytes32(0) && credentialHash != requiredCredentialType) {
+            revert CredentialTypeMismatch(credentialHash, requiredCredentialType);
+        }
         IdentityVerifier.Attestation memory attestation = IdentityVerifier.Attestation({
             user: receiver, credentialHash: credentialHash, expiry: expiry, nonce: nonce
         });
@@ -402,22 +441,49 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /// @dev Deposit gate for the share *receiver*. Passes if the receiver
-    ///      holds a live VC attestation, otherwise falls back to the
-    ///      whitelist. Order matters for two reasons: (1) the attestation
-    ///      is the stronger auth (Variant A — a valid credential lets an
-    ///      address in even if it was never whitelisted); (2) checking it
-    ///      first keeps the whitelist-only path byte-identical to v0.2.0 —
-    ///      when `identityVerifier` is the zero address the `&&`
+    ///      holds a live VC attestation of the required type, otherwise
+    ///      falls back to the whitelist. The attestation arm requires three
+    ///      things together: a wired verifier, a live session
+    ///      (`attestedUntil(receiver) >= now`), and — when
+    ///      `requiredCredentialType` is non-zero — a recorded credential
+    ///      type that matches it. The type clause is what closes the
+    ///      direct-consume bypass: because `attestedCredentialType` is
+    ///      written on the verifier by every consume, an address that
+    ///      consumed a wrong-type attestation directly still fails here.
+    ///      Order matters for two reasons: (1) the attestation is the
+    ///      stronger auth (Variant A — a valid credential lets an address in
+    ///      even if it was never whitelisted); (2) checking the verifier
+    ///      address first keeps the whitelist-only path byte-identical to
+    ///      v0.2.0 — when `identityVerifier` is the zero address the `&&`
     ///      short-circuits and `whitelist.checkWhitelisted` runs exactly as
-    ///      before, reverting with `NotWhitelisted`. A receiver that is
-    ///      neither attested nor whitelisted therefore still reverts with
-    ///      the familiar `Whitelist.NotWhitelisted(receiver)`.
+    ///      before, reverting with `NotWhitelisted`. A receiver that clears
+    ///      neither arm therefore still reverts with the familiar
+    ///      `Whitelist.NotWhitelisted(receiver)`.
     /// @param receiver Address that must clear at least one gate.
     function _enforceGate(address receiver) internal view {
-        if (address(identityVerifier) != address(0) && identityVerifier.attestedUntil(receiver) >= block.timestamp) {
+        if (
+            address(identityVerifier) != address(0) && identityVerifier.attestedUntil(receiver) >= block.timestamp
+                && (requiredCredentialType == bytes32(0)
+                    || identityVerifier.attestedCredentialType(receiver) == requiredCredentialType)
+        ) {
             return;
         }
         whitelist.checkWhitelisted(receiver);
+    }
+
+    /// @notice Set the credential type the deposit gate requires.
+    /// @dev    `onlyOwner` because it is a trust-bearing policy change
+    ///         affecting who can deposit. Setting it to zero disables the
+    ///         type filter (any trusted-signed attestation passes); setting
+    ///         a new non-zero type immediately stops attestations of the old
+    ///         type from clearing the gate, even ones already consumed
+    ///         within their window (their recorded `attestedCredentialType`
+    ///         no longer matches). This is the intended migration lever for
+    ///         moving to a new KYC standard.
+    /// @param  newType New required credential type (zero = accept any).
+    function setRequiredCredentialType(bytes32 newType) external onlyOwner {
+        emit RequiredCredentialTypeUpdated(requiredCredentialType, newType);
+        requiredCredentialType = newType;
     }
 
     /// @dev Internal withdraw hook. Rejects zero-amount calls, realizes

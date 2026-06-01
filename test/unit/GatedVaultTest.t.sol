@@ -149,6 +149,31 @@ contract GatedVaultTest is Test {
         assertEq(address(vault.whitelist()), address(whitelist), "whitelist wired");
     }
 
+    // -------- Required credential type management (todo-38) --------
+
+    function test_RequiredCredentialTypeDefaultZero() public view {
+        assertEq(vault.requiredCredentialType(), bytes32(0), "required type must default to zero (disabled)");
+    }
+
+    function test_OwnerCanUpdateCredentialType() public {
+        bytes32 newType = keccak256("VerifiedInvestor");
+
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit GatedVault.RequiredCredentialTypeUpdated(bytes32(0), newType);
+
+        vm.prank(owner);
+        vault.setRequiredCredentialType(newType);
+
+        assertEq(vault.requiredCredentialType(), newType, "required type not updated");
+    }
+
+    function test_NonOwnerCannotUpdateCredentialType() public {
+        address nonOwner = makeAddr("nonOwner");
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
+        vault.setRequiredCredentialType(keccak256("VerifiedInvestor"));
+    }
+
     function test_SetYieldRateRevertsAboveMax() public {
         uint256 tooHigh = 5001;
         vm.prank(owner);

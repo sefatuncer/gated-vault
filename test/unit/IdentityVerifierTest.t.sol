@@ -292,6 +292,21 @@ contract IdentityVerifierTest is Test {
         assertEq(verifier.attestedUntil(a.user), a.expiry, "attestedUntil not written");
     }
 
+    /// @dev todo-38: consume records the credential type so the downstream
+    ///      vault gate can require a specific type. Recording it on the
+    ///      verifier (not the vault) is what makes the vault's type check
+    ///      non-bypassable for direct consumes. Default is zero before any
+    ///      consume.
+    function test_AttestedCredentialTypeRecorded() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        assertEq(verifier.attestedCredentialType(a.user), bytes32(0), "type dirty before consume");
+
+        bytes memory sig = _signWithKey(a, SIGNER_KEY);
+        verifier.consumeAttestation(a, sig);
+
+        assertEq(verifier.attestedCredentialType(a.user), a.credentialHash, "credential type not recorded");
+    }
+
     function test_ConsumeRevertsOnExpired() public {
         IdentityVerifier.Attestation memory a = _defaultAttestation();
         // Move now past expiry so the check `expiry < block.timestamp` fires.

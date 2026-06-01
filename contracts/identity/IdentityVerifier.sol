@@ -84,6 +84,22 @@ contract IdentityVerifier is EIP712, AccessControl {
     ///         through.
     mapping(address user => uint64 expiry) public attestedUntil;
 
+    /// @notice Credential type carried by the user's latest consumed attestation.
+    /// @dev    Written by `consumeAttestation` (todo-38) alongside
+    ///         `attestedUntil`, holding the attestation's
+    ///         `credentialHash` (interpreted as the credential type /
+    ///         schema identifier; per-issuance uniqueness is the
+    ///         `nonce`'s job, not this field's). Read by
+    ///         `GatedVault._enforceGate` so the vault can require a
+    ///         specific credential type. Recording it here — on the
+    ///         verifier that every consume routes through — is what
+    ///         makes the vault's type check non-bypassable: a caller
+    ///         who consumes an attestation directly (skipping the
+    ///         vault) still leaves the consumed type on record, so the
+    ///         vault gate rejects a deposit whose recorded type does
+    ///         not match the required one.
+    mapping(address user => bytes32 credentialType) public attestedCredentialType;
+
     // -------- Errors --------
 
     /// @notice Reverts when the attestation has already passed its expiry.
@@ -209,6 +225,7 @@ contract IdentityVerifier is EIP712, AccessControl {
 
         usedNonces[a.nonce] = true;
         attestedUntil[a.user] = a.expiry;
+        attestedCredentialType[a.user] = a.credentialHash;
 
         emit AttestationConsumed(a.user, a.nonce, a.expiry);
     }

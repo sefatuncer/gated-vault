@@ -219,4 +219,132 @@ contract VaultWithAttestationTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Whitelist.NotWhitelisted.selector, alice));
         vault.deposit(DEPOSIT, alice);
     }
+
+    // -------- Credential type enforcement (todo-38) --------
+
+    bytes32 internal constant TYPE_INVESTOR = keccak256("VerifiedInvestor");
+    bytes32 internal constant TYPE_KYC = keccak256("KYCApproved");
+
+    function _setRequiredType(bytes32 t) internal {
+        vm.prank(owner);
+        vault.setRequiredCredentialType(t);
+    }
+
+    /// @dev Happy path with a type filter: the attestation's credentialHash
+    ///      matches `requiredCredentialType`, so the deposit clears.
+    function test_TypeMatchDepositSucceeds() public {
+        _setRequiredType(TYPE_INVESTOR);
+
+        uint64 expiry = uint64(block.timestamp + 1 hours);
+        bytes32 nonce = keccak256("alice-type-match");
+        bytes memory sig = _sign(alice, TYPE_INVESTOR, expiry, nonce);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.depositWithAttestation(DEPOSIT, alice, TYPE_INVESTOR, expiry, nonce, sig);
+        vm.stopPrank();
+
+        assertGt(shares, 0, "type-matching deposit failed");
+        assertEq(verifier.attestedCredentialType(alice), TYPE_INVESTOR, "recorded type mismatch");
+    }
+
+    /// @dev Wrong type on the vault's own entry point reverts early with
+    ///      CredentialTypeMismatch, before the nonce is consumed.
+    function test_WrongTypeDepositWithAttestationReverts() public {
+        _setRequiredType(TYPE_INVESTOR);
+
+        uint64 expiry = uint64(block.timestamp + 1 hours);
+        bytes32 nonce = keccak256("alice-wrong-type");
+        bytes memory sig = _sign(alice, TYPE_KYC, expiry, nonce);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(GatedVault.CredentialTypeMismatch.selector, TYPE_KYC, TYPE_INVESTOR));
+        vault.depositWithAttestation(DEPOSIT, alice, TYPE_KYC, expiry, nonce, sig);
+        vm.stopPrank();
+
+        // Nonce preserved: the wrong-type attempt did not consume it.
+        assertFalse(verifier.usedNonces(nonce), "wrong-type attempt burned the nonce");
+    }
+
+    /// @dev Migration: after the owner switches the required type, an old-type
+    ///      attestation no longer clears the vault entry point, and a holder
+    ///      attested under the old type can no longer plain-deposit either
+    ///      (the gate's recorded-type clause rejects the stale session).
+    function test_OldTypeAttestationFailsAfterChange() public {
+        _setRequiredType(TYPE_INVESTOR);
+
+        uint64 expiry = uint64(block.timestamp + 1 hours);
+        bytes32 nonce1 = keccak256("alice-old-type-1");
+        bytes memory sig1 = _sign(alice, TYPE_INVESTOR, expiry, nonce1);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.depositWithAttestation(DEPOSIT, alice, TYPE_INVESTOR, expiry, nonce1, sig1);
+        vm.stopPrank();
+
+        // Owner migrates to a new KYC standard.
+        _setRequiredType(TYPE_KYC);
+
+        // A fresh old-type attestation is rejected early at the entry point.
+        bytes32 nonce2 = keccak256("alice-old-type-2");
+        bytes memory sig2 = _sign(alice, TYPE_INVESTOR, expiry, nonce2);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(GatedVault.CredentialTypeMismatch.selector, TYPE_INVESTOR, TYPE_KYC));
+        vault.depositWithAttestation(DEPOSIT, alice, TYPE_INVESTOR, expiry, nonce2, sig2);
+
+        // The still-live old-type session no longer satisfies the gate, so
+        // her plain deposit falls through to the whitelist and reverts.
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Whitelist.NotWhitelisted.selector, alice));
+        vault.deposit(DEPOSIT, alice);
+    }
+
+    /// @dev After the owner switches the required type, an attestation of the
+    ///      new type clears the gate.
+    function test_NewTypeAttestationSucceedsAfterChange() public {
+        _setRequiredType(TYPE_INVESTOR);
+        _setRequiredType(TYPE_KYC);
+
+        uint64 expiry = uint64(block.timestamp + 1 hours);
+        bytes32 nonce = keccak256("alice-new-type");
+        bytes memory sig = _sign(alice, TYPE_KYC, expiry, nonce);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.depositWithAttestation(DEPOSIT, alice, TYPE_KYC, expiry, nonce, sig);
+        vm.stopPrank();
+
+        assertGt(shares, 0, "new-type deposit failed");
+    }
+
+    /// @dev Audit-grade bypass closure: a caller who consumes a wrong-type
+    ///      (but trusted-signed) attestation directly on the verifier —
+    ///      skipping the vault's early type check — still cannot deposit. The
+    ///      gate reads the recorded `attestedCredentialType`, which does not
+    ///      match `requiredCredentialType`, so the deposit falls through to
+    ///      the whitelist and reverts. This is the property that makes the
+    ///      on-chain type filter real rather than theater.
+    function test_DirectConsumeWrongTypeCannotBypassGate() public {
+        _setRequiredType(TYPE_INVESTOR);
+
+        // Attacker holds a valid, trusted-signed attestation of the WRONG
+        // type and consumes it directly on the verifier.
+        uint64 expiry = uint64(block.timestamp + 1 hours);
+        bytes32 nonce = keccak256("alice-direct-consume");
+        bytes memory sig = _sign(alice, TYPE_KYC, expiry, nonce);
+        IdentityVerifier.Attestation memory a =
+            IdentityVerifier.Attestation({ user: alice, credentialHash: TYPE_KYC, expiry: expiry, nonce: nonce });
+        verifier.consumeAttestation(a, sig);
+
+        assertEq(verifier.attestedUntil(alice), expiry, "direct consume did not set session");
+        assertEq(verifier.attestedCredentialType(alice), TYPE_KYC, "direct consume did not record type");
+
+        // The plain deposit still reverts: recorded type != required type.
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(Whitelist.NotWhitelisted.selector, alice));
+        vault.deposit(DEPOSIT, alice);
+        vm.stopPrank();
+    }
 }
