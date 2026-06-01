@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import { Test } from "forge-std/Test.sol";
 import { IAccessControl } from "@openzeppelin/contracts/access/IAccessControl.sol";
+import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { IdentityVerifier } from "../../contracts/identity/IdentityVerifier.sol";
 
 /// @title  IdentityVerifierTest
@@ -549,5 +550,101 @@ contract IdentityVerifierTest is Test {
 
         assertTrue(verifier.usedNonces(a.nonce), "rotated-key consume did not mark nonce");
         assertEq(verifier.attestedUntil(a.user), a.expiry, "rotated-key consume did not write attestedUntil");
+    }
+
+    // -------- Revert matrix: signature tampering + malleability (todo-36) --------
+
+    /// @dev secp256k1 group order, used to construct the upper-half-order
+    ///      malleable counterpart of a canonical signature.
+    uint256 internal constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+
+    /// @dev Message-binding at the consume level: a signature over one
+    ///      attestation must not validate a different attestation. The
+    ///      signer authorizes a credential for `alice`, but the caller
+    ///      submits a copy with a swapped `credentialHash`. The on-chain
+    ///      digest changes, recovery yields an unrelated address, and the
+    ///      role check rejects it. `test_HashAttestationChangesPerField`
+    ///      proves the digest is field-sensitive; this proves the consume
+    ///      path actually rejects the mismatch (and never marks the nonce).
+    function test_WrongCredentialTypeMismatch() public {
+        IdentityVerifier.Attestation memory signed = _defaultAttestation();
+        bytes memory sig = _signWithKey(signed, SIGNER_KEY);
+
+        IdentityVerifier.Attestation memory tampered = signed;
+        tampered.credentialHash = keccak256("credential-identifier:forged-type");
+
+        bytes32 digest =
+            verifier.hashAttestation(tampered.user, tampered.credentialHash, tampered.expiry, tampered.nonce);
+        address recovered = ECDSA.recover(digest, sig);
+        assertTrue(recovered != signer, "tampered digest must not recover the trusted signer");
+
+        vm.expectRevert(abi.encodeWithSelector(IdentityVerifier.UntrustedSigner.selector, recovered));
+        verifier.consumeAttestation(tampered, sig);
+
+        assertFalse(verifier.usedNonces(tampered.nonce), "rejected tampered attestation must not mark nonce");
+    }
+
+    /// @dev The attack with teeth: an attacker who captures a valid
+    ///      signature tries to extend the attestation's validity window
+    ///      by inflating `expiry` before submitting. The digest binds
+    ///      `expiry`, so the recovered signer no longer matches and the
+    ///      role check rejects it. Pairs with `test_WrongCredentialTypeMismatch`
+    ///      on the validity axis rather than the identity axis.
+    function test_TamperedExpiryReverts() public {
+        IdentityVerifier.Attestation memory signed = _defaultAttestation();
+        bytes memory sig = _signWithKey(signed, SIGNER_KEY);
+
+        IdentityVerifier.Attestation memory tampered = signed;
+        tampered.expiry = signed.expiry + 365 days; // attacker inflates the window
+
+        bytes32 digest =
+            verifier.hashAttestation(tampered.user, tampered.credentialHash, tampered.expiry, tampered.nonce);
+        address recovered = ECDSA.recover(digest, sig);
+        assertTrue(recovered != signer, "tampered-expiry digest must not recover the trusted signer");
+
+        vm.expectRevert(abi.encodeWithSelector(IdentityVerifier.UntrustedSigner.selector, recovered));
+        verifier.consumeAttestation(tampered, sig);
+
+        assertFalse(verifier.usedNonces(tampered.nonce), "rejected tampered-expiry attestation must not mark nonce");
+    }
+
+    /// @dev EIP-2 malleability defense. `vm.sign` returns a canonical
+    ///      low-`s` signature; its upper-half-order counterpart
+    ///      (`s' = N - s`, `v` flipped) recovers the same address via raw
+    ///      `ecrecover` but is rejected by `ECDSA.tryRecover` with
+    ///      `InvalidSignatureS`, which `consumeAttestation` surfaces as
+    ///      `SignatureInvalid`. Code proof for the NatSpec claim that the
+    ///      contract rejects high-`s` malleability.
+    function test_HighSMalleabilityRejected() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        bytes32 digest = verifier.hashAttestation(a.user, a.credentialHash, a.expiry, a.nonce);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(SIGNER_KEY, digest);
+
+        bytes32 sHigh = bytes32(SECP256K1_N - uint256(s));
+        uint8 vFlipped = v == 27 ? 28 : 27;
+        bytes memory malleable = abi.encodePacked(r, sHigh, vFlipped);
+
+        vm.expectRevert(IdentityVerifier.SignatureInvalid.selector);
+        verifier.consumeAttestation(a, malleable);
+
+        assertFalse(verifier.usedNonces(a.nonce), "malleable signature must not mark nonce");
+    }
+
+    /// @dev Recovery-failure path, distinct from the length-failure path
+    ///      (`test_ConsumeRevertsOnMalformedSignature`). A 65-byte all-zero
+    ///      signature passes the length gate, but `ecrecover(digest, 0, 0, 0)`
+    ///      returns the zero address, so `ECDSA.tryRecover` reports
+    ///      `InvalidSignature` and `consumeAttestation` reverts with
+    ///      `SignatureInvalid` — before the role check runs. This pins the
+    ///      short-circuit that prevents an `address(0)` recovery from ever
+    ///      reaching `hasRole(SIGNER_ROLE, address(0))`.
+    function test_ZeroFilledSignatureReverts() public {
+        IdentityVerifier.Attestation memory a = _defaultAttestation();
+        bytes memory zeroSig = new bytes(65); // length-valid, recovers to address(0)
+
+        vm.expectRevert(IdentityVerifier.SignatureInvalid.selector);
+        verifier.consumeAttestation(a, zeroSig);
+
+        assertFalse(verifier.usedNonces(a.nonce), "zero-filled signature must not mark nonce");
     }
 }
