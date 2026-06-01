@@ -8,6 +8,7 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { Whitelist } from "./access/Whitelist.sol";
+import { IdentityVerifier } from "./identity/IdentityVerifier.sol";
 
 /// @title  GatedVault
 /// @author Sefa Tunçer
@@ -15,16 +16,22 @@ import { Whitelist } from "./access/Whitelist.sol";
 ///         with reserve-bounded harvest, virtual-shares decimals offset
 ///         (inflation defense), tracked-AUM `totalAssets` (donation oracle
 ///         defense), constructor-time ERC-777 reject (toxic-asset filter),
-///         and an RBAC `Whitelist` registry that gates the deposit path
-///         (share recipients must be on the allow list). Verifiable
-///         Credential proofs replace the whitelist in Faz 3 (todos 30+);
-///         the public ERC-4626 surface stays untouched so aggregator
-///         composability is preserved.
+///         and an RBAC `Whitelist` registry plus an optional
+///         `IdentityVerifier` (EIP-712 Verifiable Credential attestations)
+///         that gate the deposit path (share recipients must be on the
+///         allow list OR carry a live attestation). The public ERC-4626
+///         surface stays untouched so aggregator composability is
+///         preserved; `depositWithAttestation` is an additive entry point.
 /// @dev    The internal `_deposit` and `_withdraw` hooks already realize
 ///         pending yield (temporal fairness across depositors) and update
 ///         tracked `principal`. `_deposit` additionally calls
-///         `whitelist.checkWhitelisted(receiver)` so the share *holder*
-///         is gated (not the relayer / caller). Withdraw is intentionally
+///         `_enforceGate(receiver)` so the share *holder* is gated (not the
+///         relayer / caller): the receiver passes if it holds a live
+///         attestation (`identityVerifier.attestedUntil(receiver) >=
+///         block.timestamp`) or, failing that, is on the `Whitelist`.
+///         When `identityVerifier` is the zero address the vault runs in
+///         whitelist-only mode and the gate is byte-identical to v0.2.0.
+///         Withdraw is intentionally
 ///         ungated — once funds are in, the depositor must always be able
 ///         to exit, even if the admin later removes the address. Share
 ///         transfers between EOAs are not gated in v0.2.0; an `_update`
@@ -84,6 +91,28 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     ///         point.
     Whitelist public immutable whitelist;
 
+    /// @notice Optional EIP-712 Verifiable Credential attestation gate.
+    /// @dev    Wired at construction and `immutable` for the same trust
+    ///         posture as `whitelist`: the on-chain assumption is "this
+    ///         specific verifier", not "whatever the owner re-points to".
+    ///         A live attestation
+    ///         (`attestedUntil(receiver) >= block.timestamp`) lets a
+    ///         receiver deposit even when absent from the whitelist
+    ///         (Variant A: the credential is the stronger auth). The zero
+    ///         address is a valid configuration meaning "VC path disabled,
+    ///         whitelist-only" — it keeps the v0.2.0 deploy shape and the
+    ///         existing test surface working unchanged. Note the gate reads
+    ///         `attestedUntil`, a session record set by
+    ///         `IdentityVerifier.consumeAttestation`: an attestation is a
+    ///         time-boxed deposit window, not a per-deposit proof. Which
+    ///         credential *type* counts is enforced off-chain at the
+    ///         signer (the verifier-service only signs valid credentials);
+    ///         the vault deliberately does not re-check a credential type
+    ///         on-chain because `attestedUntil` carries none and a caller
+    ///         can set it via a direct `consumeAttestation`, so an on-chain
+    ///         type compare would be bypassable theater.
+    IdentityVerifier public immutable identityVerifier;
+
     // -------- Yield: errors / events --------
 
     /// @notice Reverts when a yield rate above MAX_YIELD_RATE is requested.
@@ -136,11 +165,14 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
     /// @param  owner_            Initial owner address.
     /// @param  initialYieldRate  Starting yield rate in basis points; must be <= MAX_YIELD_RATE.
     /// @param  whitelist_        Allow-list registry checked in `_deposit`; must be non-zero.
+    /// @param  identityVerifier_ VC attestation gate; the zero address
+    ///                           disables the attestation path (whitelist-only mode).
     constructor(
         IERC20Metadata asset_,
         address owner_,
         uint256 initialYieldRate,
-        Whitelist whitelist_
+        Whitelist whitelist_,
+        IdentityVerifier identityVerifier_
     )
         ERC4626(IERC20(address(asset_)))
         ERC20(string.concat("Gated ", asset_.symbol(), " Vault"), string.concat("g", asset_.symbol()))
@@ -168,6 +200,7 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         }
 
         whitelist = whitelist_;
+        identityVerifier = identityVerifier_;
         yieldRate = initialYieldRate;
         lastHarvest = block.timestamp;
     }
@@ -250,6 +283,57 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
     }
 
+    // -------- VC attestation deposit --------
+
+    /// @notice Deposit `assets` for `receiver` by presenting a fresh EIP-712
+    ///         attestation, bypassing the whitelist requirement.
+    /// @dev    Consumes the attestation on `identityVerifier` first
+    ///         (validates expiry / replay / signer, marks the nonce used,
+    ///         and records `attestedUntil[receiver] = expiry`), then routes
+    ///         through the standard `deposit` entry point. The subsequent
+    ///         `_enforceGate(receiver)` inside `_deposit` reads the
+    ///         just-written `attestedUntil` and passes, so a receiver that
+    ///         is not on the whitelist still gets in (Variant A). Because
+    ///         `expiry >= block.timestamp` is guaranteed by `consumeAttestation`'s
+    ///         strict `expiry < block.timestamp` reject, the `>=` gate
+    ///         cannot fail on the equality boundary. Order is
+    ///         Checks-Effects-Interactions: the attestation effect lands on
+    ///         the verifier before the asset `transferFrom` in `deposit`.
+    ///         `nonReentrant` guards the two external interactions
+    ///         (`consumeAttestation`, then `deposit` -> `transferFrom`);
+    ///         ERC-777 assets are already rejected at construction, so the
+    ///         guard is defense-in-depth rather than the sole barrier.
+    ///         Reverts propagate the verifier's typed errors
+    ///         (`AttestationExpired`, `AttestationReplayed`,
+    ///         `UntrustedSigner`, `SignatureInvalid`) unchanged. Requires a
+    ///         non-zero `identityVerifier`; in whitelist-only mode the call
+    ///         reverts when it dispatches to the zero address.
+    /// @param  assets         Asset units to pull from the caller.
+    /// @param  receiver       Share recipient; also the attestation subject (`user`).
+    /// @param  credentialHash `keccak256` of the off-chain credential identifier.
+    /// @param  expiry         Attestation expiry (UNIX); must be >= now at consume time.
+    /// @param  nonce          Single-use attestation nonce.
+    /// @param  signature      65-byte (r||s||v) signature over the typed-data digest.
+    /// @return shares         Vault shares minted to `receiver`.
+    function depositWithAttestation(
+        uint256 assets,
+        address receiver,
+        bytes32 credentialHash,
+        uint64 expiry,
+        bytes32 nonce,
+        bytes calldata signature
+    )
+        external
+        nonReentrant
+        returns (uint256 shares)
+    {
+        IdentityVerifier.Attestation memory attestation = IdentityVerifier.Attestation({
+            user: receiver, credentialHash: credentialHash, expiry: expiry, nonce: nonce
+        });
+        identityVerifier.consumeAttestation(attestation, signature);
+        return deposit(assets, receiver);
+    }
+
     /// @dev Internal harvest core. Bounded by available reserve so a
     ///      yield rate that briefly exceeds reserve cannot mint principal
     ///      that is not actually backed by tokens in the vault. Emits
@@ -294,26 +378,46 @@ contract GatedVault is ERC4626, Ownable, ReentrancyGuard {
 
     /// @dev Internal deposit hook. Order:
     ///      1. reject zero-amount,
-    ///      2. reject non-whitelisted *receiver* (caller can be a relayer),
+    ///      2. reject a *receiver* that passes neither gate (attestation
+    ///         or whitelist) via `_enforceGate`,
     ///      3. realize pending yield so the new depositor mints shares
     ///         against an up-to-date `totalAssets()`,
     ///      4. delegate to OZ ERC-4626 (transferFrom + mint),
     ///      5. update tracked `principal`.
     ///      The gating check sits before `_harvestYield` so a rejected
     ///      deposit costs no state writes (no unexpected event emission,
-    ///      no `lastHarvest` stamp). Faz 3 swaps `checkWhitelisted` for a
-    ///      VC attestation check at this exact line; the ERC-4626 ABI
-    ///      stays unchanged.
+    ///      no `lastHarvest` stamp). This single insertion point serves
+    ///      both the plain ERC-4626 entry points and
+    ///      `depositWithAttestation`; the ERC-4626 ABI stays unchanged.
     /// @param caller   ERC-4626 caller (msg.sender of the public entry point).
-    /// @param receiver Address that receives the minted shares; must be whitelisted.
+    /// @param receiver Address that receives the minted shares; must pass `_enforceGate`.
     /// @param assets   Asset units pulled from caller, added to `principal`.
     /// @param shares   Share units minted to receiver (precomputed by ERC-4626 super).
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
         if (assets == 0) revert ZeroAssets();
-        whitelist.checkWhitelisted(receiver);
+        _enforceGate(receiver);
         _harvestYield();
         super._deposit(caller, receiver, assets, shares);
         principal += assets;
+    }
+
+    /// @dev Deposit gate for the share *receiver*. Passes if the receiver
+    ///      holds a live VC attestation, otherwise falls back to the
+    ///      whitelist. Order matters for two reasons: (1) the attestation
+    ///      is the stronger auth (Variant A — a valid credential lets an
+    ///      address in even if it was never whitelisted); (2) checking it
+    ///      first keeps the whitelist-only path byte-identical to v0.2.0 —
+    ///      when `identityVerifier` is the zero address the `&&`
+    ///      short-circuits and `whitelist.checkWhitelisted` runs exactly as
+    ///      before, reverting with `NotWhitelisted`. A receiver that is
+    ///      neither attested nor whitelisted therefore still reverts with
+    ///      the familiar `Whitelist.NotWhitelisted(receiver)`.
+    /// @param receiver Address that must clear at least one gate.
+    function _enforceGate(address receiver) internal view {
+        if (address(identityVerifier) != address(0) && identityVerifier.attestedUntil(receiver) >= block.timestamp) {
+            return;
+        }
+        whitelist.checkWhitelisted(receiver);
     }
 
     /// @dev Internal withdraw hook. Rejects zero-amount calls, realizes

@@ -10,6 +10,7 @@ import { MockUSDC } from "../../contracts/mocks/MockUSDC.sol";
 import { MockERC777 } from "../../contracts/mocks/MockERC777.sol";
 import { GatedVault } from "../../contracts/GatedVault.sol";
 import { Whitelist } from "../../contracts/access/Whitelist.sol";
+import { IdentityVerifier } from "../../contracts/identity/IdentityVerifier.sol";
 
 /// @title  GatedVaultTest
 /// @notice Unit tests for the vault: construction metadata, inflation defense,
@@ -26,7 +27,9 @@ contract GatedVaultTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         whitelist = new Whitelist(owner);
-        vault = new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE, whitelist);
+        vault = new GatedVault(
+            IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE, whitelist, IdentityVerifier(address(0))
+        );
     }
 
     /// @dev Helper: owner grants whitelist membership to `user`. Most existing
@@ -128,12 +131,18 @@ contract GatedVaultTest is Test {
     function test_ConstructorRevertsAboveMax() public {
         uint256 tooHigh = 5001;
         vm.expectRevert(abi.encodeWithSelector(GatedVault.YieldRateTooHigh.selector, tooHigh, 5000));
-        new GatedVault(IERC20Metadata(address(usdc)), owner, tooHigh, whitelist);
+        new GatedVault(IERC20Metadata(address(usdc)), owner, tooHigh, whitelist, IdentityVerifier(address(0)));
     }
 
     function test_ConstructorRevertsForZeroWhitelist() public {
         vm.expectRevert(GatedVault.ZeroWhitelist.selector);
-        new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE, Whitelist(address(0)));
+        new GatedVault(
+            IERC20Metadata(address(usdc)),
+            owner,
+            INITIAL_YIELD_RATE,
+            Whitelist(address(0)),
+            IdentityVerifier(address(0))
+        );
     }
 
     function test_ConstructorStoresWhitelist() public view {
@@ -316,7 +325,9 @@ contract GatedVaultTest is Test {
     function test_RejectsERC777Asset() public {
         MockERC777 erc777 = new MockERC777();
         vm.expectRevert(GatedVault.ERC777NotSupported.selector);
-        new GatedVault(IERC20Metadata(address(erc777)), owner, INITIAL_YIELD_RATE, whitelist);
+        new GatedVault(
+            IERC20Metadata(address(erc777)), owner, INITIAL_YIELD_RATE, whitelist, IdentityVerifier(address(0))
+        );
     }
 
     // -------- Deposit flow (todo-14) --------

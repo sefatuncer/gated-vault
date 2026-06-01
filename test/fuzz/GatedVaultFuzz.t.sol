@@ -6,6 +6,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { MockUSDC } from "../../contracts/mocks/MockUSDC.sol";
 import { GatedVault } from "../../contracts/GatedVault.sol";
 import { Whitelist } from "../../contracts/access/Whitelist.sol";
+import { IdentityVerifier } from "../../contracts/identity/IdentityVerifier.sol";
 
 /// @title  GatedVaultFuzzTest
 /// @author Sefa Tunçer
@@ -25,7 +26,9 @@ contract GatedVaultFuzzTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         whitelist = new Whitelist(owner);
-        vault = new GatedVault(IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE, whitelist);
+        vault = new GatedVault(
+            IERC20Metadata(address(usdc)), owner, INITIAL_YIELD_RATE, whitelist, IdentityVerifier(address(0))
+        );
         // Fuzz properties exercise the happy path; alice is the sole actor and
         // is whitelisted at construction so the gating check never reverts.
         vm.prank(owner);
