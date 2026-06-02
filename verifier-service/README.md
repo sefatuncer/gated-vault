@@ -45,6 +45,26 @@ npm run lint       # eslint
 npm run format     # prettier --write
 ```
 
+## Identities (did:web)
+
+The issuer and verifier are `did:web` identities (ADR-004). A `did:web` resolves
+through DNS + HTTPS, so anyone can verify it without a ledger:
+
+- `did:web:gated-vault-issuer.example` -> `https://gated-vault-issuer.example/.well-known/did.json`
+- `did:web:gated-vault-verifier.example` -> the document served at this
+  service's `.well-known/did.json`
+
+Both use Ed25519 keys exposed as `JsonWebKey2020` verification methods
+(`publicKeyJwk`), which lines up with the JWT VC / SD-JWT VC path. These
+SSI-layer keys are **separate** from the on-chain EIP-712 signer
+(`SIGNER_PRIVATE_KEY`, secp256k1) — different algorithm, different job.
+
+`src/identity/dids.ts` holds the key derivation, the `did:web` -> URL
+resolver, and the DID-document builder. The `.well-known/did.json` checked in
+here is a **test artifact**: its public key is derived from a documented test
+seed, so it must not be reused for a real deployment. Production regenerates
+the document from a securely generated key at the real domain (deploy todo-82).
+
 ## Environment
 
 Copy `.env.example` to `.env` and fill it in. Testnet only — no mainnet RPC or
@@ -54,9 +74,13 @@ mainnet key. The `.env` file is gitignored; never commit a real key.
 
 ```
 verifier-service/
-├── src/            service source (entrypoint: src/index.ts)
-├── test/           vitest specs
-├── tsconfig.json   ESM, strict, decorator metadata
+├── src/
+│   ├── index.ts        entrypoint
+│   └── identity/       did:web keys, resolver, DID-document builder
+├── test/               vitest specs (mirrors src/)
+├── .well-known/
+│   └── did.json        verifier DID document (test artifact)
+├── tsconfig.json       ESM, strict, decorator metadata
 ├── eslint.config.mjs
-└── .env.example    config template
+└── .env.example        config template
 ```
